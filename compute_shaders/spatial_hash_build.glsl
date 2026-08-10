@@ -79,7 +79,19 @@ layout(push_constant, std430) uniform Params {
 // =============================================================================
 // SPATIAL HASH CONSTANTS  (must be identical in physics_compute.glsl)
 // =============================================================================
-const uint  HASH_TABLE_SIZE   = 4096u; // MUST be a power of two — spatial_hash masks with (size - 1)
+// Sizing rule: HASH_TABLE_SIZE should be roughly 2x the number of occupied cells, and a
+// spread-out crowd occupies close to one cell per body. 32768 buckets therefore keeps the
+// load factor near 0.6 at ~20k bodies. Oversizing is free at runtime: the parity scheme in
+// main() means nothing ever iterates the table, so a bucket that no body hashes to is never
+// touched. The only cost is the fixed allocation (counts 128 KB + entries 8 MB), which is
+// why this stays a constant rather than scaling with body count — a game that starts with
+// five hogs pays the VRAM but zero per-frame time.
+const uint  HASH_TABLE_SIZE   = 32768u; // MUST be a power of two — spatial_hash masks with (size - 1)
+
+// Held at 64 rather than trimmed to the ~18 hogs that physically fit in a 2.0u cell at the
+// default 0.25 radius: a smaller BodyRadius packs far more per cell, and SpawnHogs/teleport
+// drop an entire batch on one point. Per-cell capacity costs only the entries allocation —
+// the query loop runs `count` times, not HASH_MAX_PER_CELL times.
 const uint  HASH_MAX_PER_CELL = 64u;
 const float HASH_CELL_SIZE    = 2.0;
 const float GROUND_EPSILON    = 0.01;

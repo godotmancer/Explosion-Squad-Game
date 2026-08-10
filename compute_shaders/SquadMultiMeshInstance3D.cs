@@ -182,7 +182,10 @@ public sealed partial class SquadMultiMeshInstance3D : MultiMeshInstance3D
 
   // Spatial hash — sizes must match constants in spatial_hash_build.glsl / physics_compute.glsl
   // HASH_TABLE_SIZE must be a power of two: the shaders mask with (size - 1).
-  public const int HASH_TABLE_SIZE = 4096;
+  // Fixed, not scaled to NumBodies: the build shader's parity scheme means no pass ever
+  // iterates the table, so an oversized table costs allocation only (128 KB counts +
+  // 8 MB entries) and never per-frame time. See the sizing note in spatial_hash_build.glsl.
+  public const int HASH_TABLE_SIZE = 32768;
   public const int HASH_MAX_PER_CELL = 64;
 
   // HASH_CELL_SIZE is declared in the shaders only; no C# behaviour depends on the value.

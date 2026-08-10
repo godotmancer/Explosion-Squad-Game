@@ -289,7 +289,10 @@ vec2 rotate2d(vec2 v, float angle) {
 // =============================================================================
 // SPATIAL HASH  (matches spatial_hash_build.glsl — keep constants in sync)
 // =============================================================================
-const uint  HASH_TABLE_SIZE   = 4096u; // MUST be a power of two — spatial_hash masks with (size - 1)
+const uint  HASH_TABLE_SIZE   = 32768u; // MUST be a power of two — spatial_hash masks with (size - 1)
+                                        // Sized for ~2x occupied cells at 20k bodies; see the
+                                        // sizing note in spatial_hash_build.glsl. Oversizing is
+                                        // free at runtime, so this does not scale with body count.
 const uint  HASH_MAX_PER_CELL = 64u;
 const float HASH_CELL_SIZE    = 2.0;  // world units per cell edge — kept small on purpose so
                                        // densely packed crowds stay below HASH_MAX_PER_CELL.
