@@ -595,6 +595,7 @@ metadata/_custom_type_script = "uid://c8cmujrxj2dq7"
 material_override = ExtResource("18_1w2xm")
 multimesh = SubResource("MultiMesh_thnk1")
 script = ExtResource("20_jt61w")
+NumBodies = 20000
 BodyRadius = 0.15
 YOffset = -0.25
 HogGravityScale = 4.5

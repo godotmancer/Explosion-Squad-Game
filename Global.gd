@@ -26,6 +26,7 @@ enum {
 var mouse_dragging := false
 var total_projectiles := 0
 
+
 func is_in_state(hog_state: int, state: int) -> bool:
   return (hog_state & state) != 0
 
