@@ -1,0 +1,681 @@
+[gd_scene format=3 uid="uid://c0m784riw25wo"]
+
+[ext_resource type="Script" uid="uid://csibeslj5kexm" path="res://Main.gd" id="1_hhcpw"]
+[ext_resource type="PackedScene" uid="uid://b8j01rb3028ke" path="res://projectiles/SimpleProjectile.tscn" id="2_mxvw5"]
+[ext_resource type="PackedScene" uid="uid://dhkf5io2bx625" path="res://visuals/Basic3DScene.tscn" id="3_xrxkg"]
+[ext_resource type="PackedScene" uid="uid://cv1ynmuyger1j" path="res://bombs/BombSpawner.tscn" id="4_sqvbp"]
+[ext_resource type="PackedScene" uid="uid://u5a35jibmnhm" path="res://bombs/Bomb.tscn" id="5_hri7i"]
+[ext_resource type="Script" uid="uid://foejq0dgucam" path="res://projectiles/ProjectilesSpawner.cs" id="6_w3rk5"]
+[ext_resource type="Script" uid="uid://b5wu6366pprmx" path="res://HogZoneTriggers.gd" id="7_5mvff"]
+[ext_resource type="Script" uid="uid://h8rsffid2vbl" path="res://obstacles/ObstacleArea3d.gd" id="8_mxvw5"]
+[ext_resource type="Script" uid="uid://b5c7brj4m77po" path="res://GateTrigger.gd" id="8_oye8v"]
+[ext_resource type="PackedScene" uid="uid://0reqtkgl3rfi" path="res://assets/kenney_modular-space-kit_1.0/Models/GLB format/gate-lasers.glb" id="9_40n85"]
+[ext_resource type="Script" uid="uid://bn6uolljecpu1" path="res://components/Animator.gd" id="10_gb15f"]
+[ext_resource type="Texture2D" uid="uid://s57oqxs8ac2f" path="res://assets/kenney_modular-space-kit_1.0/Models/GLB format/Textures/colormap.png" id="11_sph85"]
+[ext_resource type="ArrayMesh" uid="uid://bjcpccvrwecqp" path="res://assets/kenney_modular-space-kit_1.0/Models/OBJ format/gate-lasers.obj" id="12_o7g6l"]
+[ext_resource type="PackedScene" uid="uid://cp2b01axdkacc" path="res://visuals/DrawableGround.tscn" id="13_hhcpw"]
+[ext_resource type="ArrayMesh" uid="uid://c0hyygqjbtu0h" path="res://assets/kenney_blaster-kit_2.1/Models/OBJ format/scope-small.obj" id="14_hhcpw"]
+[ext_resource type="Script" uid="uid://c8cmujrxj2dq7" path="res://components/LookAtTracker.gd" id="17_x3yn0"]
+[ext_resource type="Material" uid="uid://cvhd2bf5npt50" path="res://assets/kenney_cube-pets_1.0/Models/GLB format/animal-hog-colormap.tres" id="18_1w2xm"]
+[ext_resource type="ArrayMesh" uid="uid://2rnm1gdr4stl" path="res://assets/kenney_cube-pets_1.0/Models/OBJ format/animal-hog.obj" id="19_gngx1"]
+[ext_resource type="Script" uid="uid://caee4ratqb6ko" path="res://compute_shaders/SquadMultiMeshInstance3D.cs" id="20_jt61w"]
+[ext_resource type="PackedScene" uid="uid://coyvpfanfk8dw" path="res://visuals/DeathFxScene.tscn" id="21_v8qla"]
+[ext_resource type="PackedScene" uid="uid://b0j6wj3dwfmnd" path="res://visuals/HogLabels.tscn" id="22_y1tbi"]
+[ext_resource type="Script" uid="uid://doifotryi5vob" path="res://MouseTargetLocation.cs" id="23_c2s76"]
+[ext_resource type="Script" uid="uid://dtvgc1teu0g65" path="res://ui/Fps.gd" id="24_f4ese"]
+[ext_resource type="Script" uid="uid://cttx42f7m5521" path="res://ui/HogsKilled.gd" id="25_mxvw5"]
+[ext_resource type="Script" uid="uid://bu2x3bqluh7yx" path="res://ui/TotalHogs.gd" id="26_xrxkg"]
+
+[sub_resource type="Gradient" id="Gradient_a0gqe"]
+interpolation_mode = 2
+interpolation_color_space = 2
+offsets = PackedFloat32Array(0.09965636, 0.30756015, 0.53264606, 0.70446736)
+colors = PackedColorArray(0, 0.080165364, 0.036433168, 1, 0.14989153, 0.3609896, 0.6458661, 1, 0.44313726, 0.2784314, 0.81960785, 1, 1.0142531, 0.6648811, 1.8247963, 1)
+
+[sub_resource type="GradientTexture2D" id="GradientTexture2D_onhp8"]
+gradient = SubResource("Gradient_a0gqe")
+use_hdr = true
+fill_from = Vector2(0.5, 1)
+fill_to = Vector2(0.5, 0)
+
+[sub_resource type="PanoramaSkyMaterial" id="PanoramaSkyMaterial_steht"]
+panorama = SubResource("GradientTexture2D_onhp8")
+
+[sub_resource type="Sky" id="Sky_mq3ih"]
+sky_material = SubResource("PanoramaSkyMaterial_steht")
+radiance_size = 4
+
+[sub_resource type="Environment" id="Environment_db7pu"]
+background_mode = 2
+sky = SubResource("Sky_mq3ih")
+ambient_light_source = 3
+ambient_light_color = Color(1, 1, 1, 1)
+reflected_light_source = 2
+tonemap_mode = 4
+glow_enabled = true
+glow_levels/1 = 2.76
+glow_levels/4 = 1.39
+glow_levels/6 = 1.43
+glow_normalized = true
+glow_intensity = 2.4
+glow_strength = 1.2
+glow_bloom = 0.01
+glow_blend_mode = 0
+glow_hdr_threshold = 0.69
+fog_enabled = true
+fog_mode = 1
+fog_light_color = Color(0.14772043, 0.45977253, 0.5532616, 1)
+fog_density = 1.0
+fog_depth_begin = 0.0
+fog_depth_end = 141.1
+
+[sub_resource type="DrawableTexture2D" id="DrawableTexture2D_pumi7"]
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_steht"]
+disable_fog = true
+disable_specular_occlusion = true
+albedo_color = Color(0.33121356, 0.38571215, 0.727373, 1)
+albedo_texture = SubResource("DrawableTexture2D_pumi7")
+grow_amount = 1.675
+
+[sub_resource type="QuadMesh" id="QuadMesh_mq3ih"]
+material = SubResource("StandardMaterial3D_steht")
+size = Vector2(300, 300)
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_v17x4"]
+albedo_color = Color(0, 1.382, 1.64, 1)
+
+[sub_resource type="CylinderMesh" id="CylinderMesh_5wuro"]
+height = 0.5
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_db7pu"]
+size = Vector3(9.182129, 1, 1.5401611)
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_kg8qs"]
+albedo_color = Color(0.6943995, 0.016302751, 0.5408173, 1)
+metallic_specular = 0.84
+rim = 0.28
+rim_tint = 0.71
+clearcoat = 0.54
+clearcoat_roughness = 0.04
+subsurf_scatter_enabled = true
+subsurf_scatter_strength = 0.79
+backlight_enabled = true
+backlight = Color(0.60609305, 0.6174238, 0, 1)
+
+[sub_resource type="BoxMesh" id="BoxMesh_db7pu"]
+size = Vector3(9.65, 1, 1.8)
+
+[sub_resource type="SphereShape3D" id="SphereShape3D_db7pu"]
+radius = 6.0076876
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_hgp1p"]
+albedo_color = Color(0.29402778, 0.29402778, 0.29402775, 1)
+metallic_specular = 0.84
+rim = 0.28
+rim_tint = 0.71
+clearcoat = 0.54
+clearcoat_roughness = 0.04
+subsurf_scatter_enabled = true
+subsurf_scatter_strength = 0.79
+backlight_enabled = true
+backlight = Color(0.60609305, 0.6174238, 0, 1)
+
+[sub_resource type="SphereMesh" id="SphereMesh_tsh8a"]
+material = SubResource("StandardMaterial3D_hgp1p")
+radius = 6.0
+height = 2.0
+
+[sub_resource type="CompressedTexture2D" id="CompressedTexture2D_5hjr7"]
+load_path = "res://.godot/imported/colormap.png-d424757ba08fd3868d451072d7749372.s3tc.ctex"
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_ux0au"]
+resource_name = "colormap"
+cull_mode = 2
+albedo_texture = SubResource("CompressedTexture2D_5hjr7")
+emission_enabled = true
+emission = Color(0.023529412, 0.1254902, 0.6901961, 1)
+emission_energy_multiplier = 0.0
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_p6wcp"]
+size = Vector3(2.341278, 1, 0.17626953)
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_pm6ea"]
+size = Vector3(0.75585556, 1, 0.17626953)
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_mxvw5"]
+resource_name = "colormap"
+cull_mode = 2
+albedo_texture = SubResource("CompressedTexture2D_5hjr7")
+emission_enabled = true
+emission = Color(0.023529412, 0.1254902, 0.6901961, 1)
+emission_energy_multiplier = 0.0
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_5wuro"]
+resource_name = "colormap"
+cull_mode = 2
+albedo_color = Color(1, 0.20784314, 0.078431375, 1)
+albedo_texture = ExtResource("11_sph85")
+emission_enabled = true
+emission = Color(0.023529412, 0.1254902, 0.6901961, 1)
+emission_energy_multiplier = 0.0
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_smc57"]
+albedo_color = Color(0.18431373, 0.39607844, 0.80784315, 1)
+metallic_specular = 0.84
+rim = 0.28
+rim_tint = 0.71
+clearcoat = 0.54
+clearcoat_roughness = 0.04
+subsurf_scatter_enabled = true
+subsurf_scatter_strength = 0.79
+backlight_enabled = true
+backlight = Color(0.60609305, 0.6174238, 0, 1)
+
+[sub_resource type="SphereShape3D" id="SphereShape3D_ovyh0"]
+radius = 2.5
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_a0gqe"]
+albedo_color = Color(1.1461712, 0.21721677, 1.1461712, 1)
+
+[sub_resource type="BoxMesh" id="BoxMesh_a0gqe"]
+material = SubResource("StandardMaterial3D_a0gqe")
+size = Vector3(0.25, 2.09, 0.25)
+
+[sub_resource type="MultiMesh" id="MultiMesh_thnk1"]
+transform_format = 1
+use_colors = true
+use_custom_data = true
+mesh = ExtResource("19_gngx1")
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_5hjr7"]
+albedo_color = Color(1.009, 1.009, 0, 1)
+
+[sub_resource type="TorusMesh" id="TorusMesh_kg8qs"]
+inner_radius = 0.4
+outer_radius = 0.5
+rings = 36
+ring_segments = 8
+
+[node name="Main" type="Node3D" unique_id=719818601 node_paths=PackedStringArray("projectile_spawner", "mouse_global_pos", "projectile_spawn_marker", "teleport_marker")]
+script = ExtResource("1_hhcpw")
+projectile_spawner = NodePath("ProjectileSpawner")
+mouse_global_pos = NodePath("MouseTargetLocation")
+projectile_spawn_marker = NodePath("TargetMarker/HeadHogAnchor/HeadHog/HogsSquadsMesh/HeadHogProjectileMarker")
+projectile_scn = ExtResource("2_mxvw5")
+teleport_marker = NodePath("TeleportMarker")
+
+[node name="Basic3DScene" parent="." unique_id=1357049663 instance=ExtResource("3_xrxkg")]
+
+[node name="DirectionalLight3D" parent="Basic3DScene" index="0" unique_id=344885326]
+light_color = Color(0.5469679, 0.546968, 0.5469679, 1)
+light_angular_distance = 0.7
+light_specular = 2.773
+directional_shadow_blend_splits = true
+directional_shadow_max_distance = 100.0
+
+[node name="RotatableCamera3D" parent="Basic3DScene" index="1" unique_id=1248314386]
+transform = Transform3D(-1, -6.497754e-08, 1.3629986e-07, 0, 0.9026732, 0.4303268, -1.509958e-07, 0.4303268, -0.9026732, -0.012458932, 26.864872, -57.833824)
+environment = SubResource("Environment_db7pu")
+target = Vector3(-0.012467441, 0, -1.4808388)
+distance = 62.429
+
+[node name="Ground" parent="Basic3DScene/WorldBounds" parent_id_path=PackedInt32Array(1357049663, 1382453810) index="0" unique_id=167985671]
+visible = false
+
+[node name="CollisionShape3D" parent="Basic3DScene/WorldBounds/Ground" index="0" unique_id=1249088641]
+visible = false
+
+[node name="MeshInstance3D" parent="Basic3DScene/WorldBounds/Ground" index="1" unique_id=1348391863]
+transform = Transform3D(1, 0, 0, 0, -4.371139e-08, 1, 0, -1, -4.371139e-08, -5.6936474, 0, 2.8380089)
+visible = false
+mesh = SubResource("QuadMesh_mq3ih")
+
+[node name="WorldLimitsRear" parent="Basic3DScene/WorldBounds" parent_id_path=PackedInt32Array(1357049663, 1382453810) index="1" unique_id=1061302725]
+visible = false
+
+[node name="WorldLimitsFront" parent="Basic3DScene/WorldBounds" parent_id_path=PackedInt32Array(1357049663, 1382453810) index="2" unique_id=868272257]
+visible = false
+
+[node name="WorldLimitsLeft" parent="Basic3DScene/WorldBounds" parent_id_path=PackedInt32Array(1357049663, 1382453810) index="3" unique_id=610799023]
+visible = false
+
+[node name="WorldLimitsRight" parent="Basic3DScene/WorldBounds" parent_id_path=PackedInt32Array(1357049663, 1382453810) index="4" unique_id=2092836655]
+visible = false
+
+[node name="BombSpawner" parent="." unique_id=1020751421 node_paths=PackedStringArray("Camera") instance=ExtResource("4_sqvbp")]
+Camera = NodePath("../Basic3DScene/RotatableCamera3D")
+BombScene = ExtResource("5_hri7i")
+
+[node name="ProjectileSpawner" type="Node" parent="." unique_id=453279761 node_paths=PackedStringArray("Squad", "Camera")]
+script = ExtResource("6_w3rk5")
+Squad = NodePath("../SquadMultiMeshInstance3D")
+Camera = NodePath("../Basic3DScene/RotatableCamera3D")
+
+[node name="HogZoneTriggers" type="Node" parent="." unique_id=99331833 node_paths=PackedStringArray("hogs_mesh_instances")]
+script = ExtResource("7_5mvff")
+hogs_mesh_instances = NodePath("../SquadMultiMeshInstance3D")
+
+[node name="TeleportMarker" type="Marker3D" parent="." unique_id=1502634782]
+transform = Transform3D(-0.0068490407, 0, 0.9999765, 0, 1, 0, -0.9999765, 0, -0.0068490407, -13.175997, 5.4381795, -22.008848)
+
+[node name="TargetMesh" type="MeshInstance3D" parent="TeleportMarker" unique_id=336978941]
+transform = Transform3D(1.0000004, 0, -4.656613e-10, 0, 1, 0, 4.656613e-10, 0, 1.0000004, 0, 0.8508754, 0)
+layers = 2
+material_override = SubResource("StandardMaterial3D_v17x4")
+cast_shadow = 0
+mesh = SubResource("CylinderMesh_5wuro")
+
+[node name="OmniLight3D" type="SpotLight3D" parent="TeleportMarker" unique_id=1449630440]
+transform = Transform3D(0.99995315, 0.0068490417, 0.00684888, -0.00684904, -4.3705235e-08, 0.9999766, 0.0068488815, -0.99997663, 4.6865654e-05, 1.1444092e-05, 2.662706, 0.0007305145)
+light_color = Color(0.09536316, 0.6968441, 0.8330994, 1)
+light_energy = 8.037
+shadow_enabled = true
+shadow_blur = 5.301
+spot_range = 20.0
+spot_attenuation = 0.23
+spot_angle = 23.72
+
+[node name="Obstacles" type="Node3D" parent="." unique_id=1389655373]
+
+[node name="Static" type="Node" parent="Obstacles" unique_id=1507099981]
+
+[node name="EnclosureWall1" type="Area3D" parent="Obstacles/Static" unique_id=512328760]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -15.556595, 0, -16.602818)
+monitoring = false
+monitorable = false
+script = ExtResource("8_mxvw5")
+metadata/_custom_type_script = "uid://h8rsffid2vbl"
+metadata/_edit_group_ = true
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="Obstacles/Static/EnclosureWall1" unique_id=912544829]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -0.057739258, 0, 0)
+shape = SubResource("BoxShape3D_db7pu")
+
+[node name="MeshInstance3D" type="MeshInstance3D" parent="Obstacles/Static/EnclosureWall1" unique_id=188133679]
+material_override = SubResource("StandardMaterial3D_kg8qs")
+mesh = SubResource("BoxMesh_db7pu")
+
+[node name="EnclosureWall2" type="Area3D" parent="Obstacles/Static" unique_id=1076799665]
+transform = Transform3D(-0.17213954, 0, 0.98507255, 0, 1, 0, -0.98507255, 0, -0.17213954, -20.215624, 0, -20.64093)
+monitoring = false
+monitorable = false
+script = ExtResource("8_mxvw5")
+metadata/_custom_type_script = "uid://h8rsffid2vbl"
+metadata/_edit_group_ = true
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="Obstacles/Static/EnclosureWall2" unique_id=360432665]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -0.0091609955, 0, 0.026062012)
+shape = SubResource("BoxShape3D_db7pu")
+
+[node name="MeshInstance3D" type="MeshInstance3D" parent="Obstacles/Static/EnclosureWall2" unique_id=1023146281]
+material_override = SubResource("StandardMaterial3D_kg8qs")
+mesh = SubResource("BoxMesh_db7pu")
+
+[node name="EnclosureWall5" type="Area3D" parent="Obstacles/Static" unique_id=1891426029]
+transform = Transform3D(-0.17213954, 0, 0.98507255, 0, 1, 0, -0.98507255, 0, -0.17213954, 9.847175, 0, -23.109854)
+monitoring = false
+monitorable = false
+script = ExtResource("8_mxvw5")
+metadata/_custom_type_script = "uid://h8rsffid2vbl"
+metadata/_edit_group_ = true
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="Obstacles/Static/EnclosureWall5" unique_id=2029209087]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -0.0091609955, 0, 0.026062012)
+shape = SubResource("BoxShape3D_db7pu")
+
+[node name="MeshInstance3D" type="MeshInstance3D" parent="Obstacles/Static/EnclosureWall5" unique_id=1997081200]
+material_override = SubResource("StandardMaterial3D_kg8qs")
+mesh = SubResource("BoxMesh_db7pu")
+
+[node name="EnclosureWall3" type="Area3D" parent="Obstacles/Static" unique_id=1107782805]
+transform = Transform3D(0.7328195, 0, 0.680423, 0, 1, 0, -0.680423, 0, 0.7328195, -7.8067365, -4.7683716e-06, -19.657759)
+monitoring = false
+monitorable = false
+script = ExtResource("8_mxvw5")
+metadata/_custom_type_script = "uid://h8rsffid2vbl"
+metadata/_edit_group_ = true
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="Obstacles/Static/EnclosureWall3" unique_id=1222155257]
+transform = Transform3D(1.0000012, 0, 2.9802322e-08, 0, 1, 0, -2.9802322e-08, 0, 1.0000012, 0, 0, 0)
+shape = SubResource("BoxShape3D_db7pu")
+
+[node name="MeshInstance3D" type="MeshInstance3D" parent="Obstacles/Static/EnclosureWall3" unique_id=372732970]
+material_override = SubResource("StandardMaterial3D_kg8qs")
+mesh = SubResource("BoxMesh_db7pu")
+
+[node name="EnclosureWall4" type="Area3D" parent="Obstacles/Static" unique_id=1725764614]
+transform = Transform3D(0.7328195, 0, 0.680423, 0, 1, 0, -0.680423, 0, 0.7328195, 19.496206, -4.7683716e-06, -21.258)
+monitoring = false
+monitorable = false
+script = ExtResource("8_mxvw5")
+metadata/_custom_type_script = "uid://h8rsffid2vbl"
+metadata/_edit_group_ = true
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="Obstacles/Static/EnclosureWall4" unique_id=490528213]
+transform = Transform3D(1.0000012, 0, 2.9802322e-08, 0, 1, 0, -2.9802322e-08, 0, 1.0000012, 0, 0, 0)
+shape = SubResource("BoxShape3D_db7pu")
+
+[node name="MeshInstance3D" type="MeshInstance3D" parent="Obstacles/Static/EnclosureWall4" unique_id=499334988]
+material_override = SubResource("StandardMaterial3D_kg8qs")
+mesh = SubResource("BoxMesh_db7pu")
+
+[node name="CircularPancake" type="Area3D" parent="Obstacles/Static" unique_id=1520094672]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 16.300114, -9.536743e-07, -3.76612)
+monitoring = false
+monitorable = false
+script = ExtResource("8_mxvw5")
+metadata/_custom_type_script = "uid://h8rsffid2vbl"
+metadata/_edit_group_ = true
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="Obstacles/Static/CircularPancake" unique_id=2146697394]
+shape = SubResource("SphereShape3D_db7pu")
+
+[node name="MeshInstance3D" type="MeshInstance3D" parent="Obstacles/Static/CircularPancake" unique_id=946320011]
+mesh = SubResource("SphereMesh_tsh8a")
+
+[node name="MultiplyGate" type="Area3D" parent="Obstacles/Static" unique_id=1877275303]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 13.529, -0.25, -18.684)
+monitoring = false
+monitorable = false
+script = ExtResource("8_mxvw5")
+metadata/_custom_type_script = "uid://h8rsffid2vbl"
+
+[node name="GateTrigger" type="Node" parent="Obstacles/Static/MultiplyGate" unique_id=815637165 node_paths=PackedStringArray("mesh_instance_3d", "gate_mesh_3d", "ui_target_marker")]
+script = ExtResource("8_oye8v")
+allowed_triggers = 1000
+mesh_instance_3d = NodePath("../LaserGateMesh/gate-lasers")
+gate_mesh_3d = NodePath("../LaserGateMesh/gate-lasers/lasers")
+ui_target_marker = NodePath("../../../../HUD/TotalHogs/Marker2D")
+
+[node name="LaserGateMesh" parent="Obstacles/Static/MultiplyGate" unique_id=1543233504 instance=ExtResource("9_40n85")]
+transform = Transform3D(1, 0, 0, 0, 0.3, 0, 0, 0, 0.3, 0, 0, 0)
+
+[node name="gate-lasers" parent="Obstacles/Static/MultiplyGate/LaserGateMesh" index="0" unique_id=884358542]
+material_override = SubResource("StandardMaterial3D_ux0au")
+
+[node name="CollisionShape3DGate" type="CollisionShape3D" parent="Obstacles/Static/MultiplyGate" unique_id=1739005903]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.00074768066, 0.46206272, 0)
+shape = SubResource("BoxShape3D_p6wcp")
+metadata/add = 5
+
+[node name="CollisionShape3DLeft" type="CollisionShape3D" parent="Obstacles/Static/MultiplyGate" unique_id=953627894]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 1.6584349, 0.46206272, 0)
+shape = SubResource("BoxShape3D_pm6ea")
+
+[node name="CollisionShape3DRight" type="CollisionShape3D" parent="Obstacles/Static/MultiplyGate" unique_id=690707013]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -1.6090002, 0.46206272, 0)
+shape = SubResource("BoxShape3D_pm6ea")
+
+[node name="Movable" type="Node" parent="Obstacles" unique_id=693829813]
+
+[node name="RotatingDeathGate" type="Area3D" parent="Obstacles/Movable" unique_id=806778830]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -14.520786, 0, 2.451336)
+monitoring = false
+monitorable = false
+script = ExtResource("8_mxvw5")
+metadata/_custom_type_script = "uid://h8rsffid2vbl"
+metadata/_edit_group_ = true
+
+[node name="MultiplyGate" type="Area3D" parent="Obstacles/Movable/RotatingDeathGate" unique_id=429929262]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -6.89744, -0.25, -0.029066086)
+monitoring = false
+monitorable = false
+script = ExtResource("8_mxvw5")
+metadata/_custom_type_script = "uid://h8rsffid2vbl"
+
+[node name="GateTrigger" type="Node" parent="Obstacles/Movable/RotatingDeathGate/MultiplyGate" unique_id=1854725467 node_paths=PackedStringArray("mesh_instance_3d", "gate_mesh_3d", "ui_target_marker")]
+script = ExtResource("8_oye8v")
+allowed_triggers = 1000
+mesh_instance_3d = NodePath("../LaserGateMesh/gate-lasers")
+gate_mesh_3d = NodePath("../LaserGateMesh/gate-lasers/lasers")
+ui_target_marker = NodePath("../../../../../HUD/TotalHogs/Marker2D")
+
+[node name="LaserGateMesh" parent="Obstacles/Movable/RotatingDeathGate/MultiplyGate" unique_id=275137973 instance=ExtResource("9_40n85")]
+transform = Transform3D(1, 0, 0, 0, 0.3, 0, 0, 0, 0.3, 0, 0, 0)
+
+[node name="gate-lasers" parent="Obstacles/Movable/RotatingDeathGate/MultiplyGate/LaserGateMesh" index="0" unique_id=884358542]
+material_override = SubResource("StandardMaterial3D_mxvw5")
+
+[node name="CollisionShape3DGate" type="CollisionShape3D" parent="Obstacles/Movable/RotatingDeathGate/MultiplyGate" unique_id=1747509411]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.00074768066, 0.46206272, 0)
+shape = SubResource("BoxShape3D_p6wcp")
+metadata/add = 5
+
+[node name="CollisionShape3DLeft" type="CollisionShape3D" parent="Obstacles/Movable/RotatingDeathGate/MultiplyGate" unique_id=1884399942]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 1.6584349, 0.46206272, 0)
+shape = SubResource("BoxShape3D_pm6ea")
+
+[node name="CollisionShape3DRight" type="CollisionShape3D" parent="Obstacles/Movable/RotatingDeathGate/MultiplyGate" unique_id=708584696]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -1.6090002, 0.46206272, 0)
+shape = SubResource("BoxShape3D_pm6ea")
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="Obstacles/Movable/RotatingDeathGate" unique_id=1626891787]
+shape = SubResource("BoxShape3D_db7pu")
+
+[node name="MeshInstance3D" type="MeshInstance3D" parent="Obstacles/Movable/RotatingDeathGate" unique_id=2072702004]
+mesh = SubResource("BoxMesh_db7pu")
+
+[node name="Animator" type="Node" parent="Obstacles/Movable/RotatingDeathGate" unique_id=1782492387 node_paths=PackedStringArray("rotation_pivot")]
+script = ExtResource("10_gb15f")
+mode = 7
+speed = 0.16
+rotation_pivot = NodePath("../Pivot")
+_editor_origin = Vector3(-14.520786, 0, 2.451336)
+_editor_transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -14.520786, 0, 2.451336)
+metadata/_custom_type_script = "uid://bn6uolljecpu1"
+
+[node name="Pivot" type="Marker3D" parent="Obstacles/Movable/RotatingDeathGate" unique_id=2079348613]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -4.3287315, -9.536743e-07, -0.003970623)
+
+[node name="DeathGate" type="Area3D" parent="Obstacles/Movable/RotatingDeathGate" unique_id=1344148603]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 6.948743, -0.28871757, 0)
+monitoring = false
+monitorable = false
+script = ExtResource("8_mxvw5")
+metadata/_custom_type_script = "uid://h8rsffid2vbl"
+
+[node name="GateTrigger" type="Node" parent="Obstacles/Movable/RotatingDeathGate/DeathGate" unique_id=444814390 node_paths=PackedStringArray("mesh_instance_3d", "ui_target_marker")]
+script = ExtResource("8_oye8v")
+allowed_triggers = 5000
+mesh_instance_3d = NodePath("../MeshInstance3D")
+ui_target_marker = NodePath("../../../../../HUD/VSplitContainer/HogsKilled/Marker2D")
+
+[node name="CollisionShape3DGate" type="CollisionShape3D" parent="Obstacles/Movable/RotatingDeathGate/DeathGate" unique_id=1394287480]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.00074768066, 0.46206272, 0)
+shape = SubResource("BoxShape3D_p6wcp")
+metadata/damage = 20.0
+
+[node name="CollisionShape3DLeft" type="CollisionShape3D" parent="Obstacles/Movable/RotatingDeathGate/DeathGate" unique_id=2099189154]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 1.6584349, 0.46206272, 0)
+shape = SubResource("BoxShape3D_pm6ea")
+
+[node name="CollisionShape3DRight" type="CollisionShape3D" parent="Obstacles/Movable/RotatingDeathGate/DeathGate" unique_id=672295010]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -1.6090002, 0.46206272, 0)
+shape = SubResource("BoxShape3D_pm6ea")
+
+[node name="MeshInstance3D" type="MeshInstance3D" parent="Obstacles/Movable/RotatingDeathGate/DeathGate" unique_id=1177245572]
+transform = Transform3D(1, 0, 0, 0, 0.3, 0, 0, 0, 0.3, 0, 0, 0)
+material_override = SubResource("StandardMaterial3D_5wuro")
+mesh = ExtResource("12_o7g6l")
+
+[node name="ShiftingBlock" type="Area3D" parent="Obstacles/Movable" unique_id=1335614158]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -14.324436, 0, -34.55751)
+monitoring = false
+monitorable = false
+script = ExtResource("8_mxvw5")
+metadata/_custom_type_script = "uid://h8rsffid2vbl"
+metadata/_edit_group_ = true
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="Obstacles/Movable/ShiftingBlock" unique_id=417047341]
+shape = SubResource("BoxShape3D_db7pu")
+
+[node name="MeshInstance3D" type="MeshInstance3D" parent="Obstacles/Movable/ShiftingBlock" unique_id=1898225004]
+material_override = SubResource("StandardMaterial3D_smc57")
+mesh = SubResource("BoxMesh_db7pu")
+
+[node name="Animator" type="Node" parent="Obstacles/Movable/ShiftingBlock" unique_id=1278489376]
+script = ExtResource("10_gb15f")
+mode = 1
+speed = 0.5
+amplitude = 5.59
+axis = 2
+_editor_origin = Vector3(-14.324436, 0, -34.55751)
+_editor_transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -14.324436, 0, -34.55751)
+metadata/_custom_type_script = "uid://bn6uolljecpu1"
+
+[node name="MarkerBlock" type="Area3D" parent="Obstacles/Movable" unique_id=1316146510]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 16.366432, 0.7748052, -3.763482)
+visible = false
+monitoring = false
+monitorable = false
+script = ExtResource("8_mxvw5")
+metadata/_custom_type_script = "uid://h8rsffid2vbl"
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="Obstacles/Movable/MarkerBlock" unique_id=875270046]
+visible = false
+shape = SubResource("SphereShape3D_ovyh0")
+
+[node name="DrawableGround" parent="." unique_id=1829754505 node_paths=PackedStringArray("hogs_mesh_instances") instance=ExtResource("13_hhcpw")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -0.25, 0)
+hogs_mesh_instances = NodePath("../SquadMultiMeshInstance3D")
+
+[node name="TargetMarker" type="MeshInstance3D" parent="." unique_id=1741522352]
+unique_name_in_owner = true
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 16.366432, 0.7748052, -3.763482)
+layers = 2
+mesh = SubResource("BoxMesh_a0gqe")
+
+[node name="RemoteTransform3D" type="RemoteTransform3D" parent="TargetMarker" unique_id=1999132650]
+visible = false
+remote_path = NodePath("../../Obstacles/Movable/MarkerBlock")
+update_rotation = false
+update_scale = false
+
+[node name="OmniLight3D" type="OmniLight3D" parent="TargetMarker" unique_id=1615406661]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.2362244, 0.0007305145)
+light_color = Color(1, 0.21176471, 1, 1)
+light_energy = 2.731
+light_size = 0.748
+shadow_enabled = true
+shadow_caster_mask = 4294967293
+omni_range = 12.009
+omni_attenuation = -0.055
+
+[node name="HeadHogAnchor" type="Node3D" parent="TargetMarker" unique_id=1489684256]
+
+[node name="HeadHog" type="Node3D" parent="TargetMarker/HeadHogAnchor" unique_id=1082273836]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.3996772, 0)
+
+[node name="HogsSquadsMesh" type="MeshInstance3D" parent="TargetMarker/HeadHogAnchor/HeadHog" unique_id=1743440881]
+transform = Transform3D(4.5, 0, 0, 0, 4.5, 0, 0, 0, 4.5, 0, 0.017229795, 0.21615648)
+mesh = ExtResource("14_hhcpw")
+
+[node name="HeadHogProjectileMarker" type="Marker3D" parent="TargetMarker/HeadHogAnchor/HeadHog/HogsSquadsMesh" unique_id=1804496214]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.0048675537, 0.06872153, -0.22726089)
+
+[node name="Animator" type="Node" parent="TargetMarker/HeadHogAnchor/HeadHog" unique_id=573594159]
+script = ExtResource("10_gb15f")
+disabled = true
+mode = 7
+speed = 0.5
+_editor_origin = Vector3(16.366432, 2.1744823, -3.763482)
+_editor_transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 16.366432, 2.1744823, -3.763482)
+metadata/_custom_type_script = "uid://bn6uolljecpu1"
+
+[node name="LookAtTracker" type="Node" parent="TargetMarker/HeadHogAnchor/HeadHog" unique_id=208678143 node_paths=PackedStringArray("target")]
+script = ExtResource("17_x3yn0")
+target = NodePath("../../../../MouseTargetLocation")
+_editor_transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 16.366432, 2.1744823, -3.763482)
+metadata/_custom_type_script = "uid://c8cmujrxj2dq7"
+
+[node name="SquadMultiMeshInstance3D" type="MultiMeshInstance3D" parent="." unique_id=582147531 node_paths=PackedStringArray("Camera", "TargetMarker", "ObstaclesRoot", "BombSpawner", "DrawableGround", "MouseGlobalPositionNode", "HogLabels")]
+material_override = ExtResource("18_1w2xm")
+multimesh = SubResource("MultiMesh_thnk1")
+script = ExtResource("20_jt61w")
+BodyRadius = 0.15
+YOffset = -0.25
+HogGravityScale = 4.5
+ArriveRadius = 4.0
+RotationSpeed = 20.0
+Camera = NodePath("../Basic3DScene/RotatableCamera3D")
+TargetMarker = NodePath("../TargetMarker")
+ObstaclesRoot = NodePath("../Obstacles")
+ObstacleMargin = 0.05
+HogHealth = 10.0
+DeathFxScene = ExtResource("21_v8qla")
+MaxDeathFxPerFrame = 100
+BombRadius = 6.0
+BombDuration = 0.3
+BombDamage = 100.0
+BombFearDuration = 5.0
+DeathFearForce = 50.0
+BombSpawner = NodePath("../BombSpawner")
+DrawableGround = NodePath("../DrawableGround")
+MouseGlobalPositionNode = NodePath("../MouseTargetLocation")
+HogLabels = NodePath("../HogsLabels")
+MaxVisibleLabels = 200
+
+[node name="HogsLabels" parent="." unique_id=1124465647 node_paths=PackedStringArray("physics_manager") instance=ExtResource("22_y1tbi")]
+label_offset = Vector3(0, 0.85, 0)
+physics_manager = NodePath("../SquadMultiMeshInstance3D")
+
+[node name="MouseTargetLocation" type="Node3D" parent="." unique_id=1316916479 node_paths=PackedStringArray("Camera")]
+unique_name_in_owner = true
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 1.9707546, -0.1916089, -3.5252993)
+script = ExtResource("23_c2s76")
+Camera = NodePath("../Basic3DScene/RotatableCamera3D")
+
+[node name="TargetMesh" type="MeshInstance3D" parent="MouseTargetLocation" unique_id=764178989]
+layers = 2
+material_override = SubResource("StandardMaterial3D_5hjr7")
+mesh = SubResource("TorusMesh_kg8qs")
+
+[node name="OmniLight3D" type="OmniLight3D" parent="MouseTargetLocation" unique_id=941042962]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.6420219, 0)
+light_color = Color(1, 1, 0, 1)
+omni_range = 1.576
+omni_attenuation = 4.65
+
+[node name="HUD" type="CanvasLayer" parent="." unique_id=968200723]
+
+[node name="TotalHogs" type="Label" parent="HUD" unique_id=364599136 node_paths=PackedStringArray("hogs_mesh_instances")]
+anchors_preset = 1
+anchor_left = 1.0
+anchor_right = 1.0
+offset_left = -85.0
+offset_bottom = 22.333336
+grow_horizontal = 0
+text = "10 hogs"
+script = ExtResource("26_xrxkg")
+hogs_mesh_instances = NodePath("../../SquadMultiMeshInstance3D")
+
+[node name="Marker2D" type="Marker2D" parent="HUD/TotalHogs" unique_id=741138776]
+position = Vector2(33, 12)
+
+[node name="VSplitContainer" type="VBoxContainer" parent="HUD" unique_id=1375881438]
+offset_right = 85.0
+offset_bottom = 166.0
+theme_override_constants/separation = 1
+
+[node name="FPS" type="Label" parent="HUD/VSplitContainer" unique_id=29105696 node_paths=PackedStringArray("hogs_mesh_instances")]
+layout_mode = 2
+text = "line 1
+line 2
+line 3
+line 4"
+script = ExtResource("24_f4ese")
+hogs_mesh_instances = NodePath("../../../SquadMultiMeshInstance3D")
+
+[node name="HogsKilled" type="Label" parent="HUD/VSplitContainer" unique_id=842058775 node_paths=PackedStringArray("hogs_mesh_instances")]
+layout_mode = 2
+text = "10 killed"
+script = ExtResource("25_mxvw5")
+hogs_mesh_instances = NodePath("../../../SquadMultiMeshInstance3D")
+
+[node name="Marker2D" type="Marker2D" parent="HUD/VSplitContainer/HogsKilled" unique_id=140142961]
+position = Vector2(33, 12)
+
+[editable path="Basic3DScene"]
+[editable path="Obstacles/Static/MultiplyGate/LaserGateMesh"]
+[editable path="Obstacles/Movable/RotatingDeathGate/MultiplyGate/LaserGateMesh"]

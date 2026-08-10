@@ -1,0 +1,32 @@
+[gd_resource type="Environment" format=3 uid="uid://bjeekb1y7857d"]
+
+[sub_resource type="Gradient" id="Gradient_1bvp3"]
+offsets = PackedFloat32Array(0.3539519, 0.6202749, 0.7250859)
+colors = PackedColorArray(0, 0, 0, 1, 0.14989153, 0.3609896, 0.6458661, 1, 0.4424539, 0.27914962, 0.81835216, 1)
+
+[sub_resource type="GradientTexture2D" id="GradientTexture2D_lquwl"]
+gradient = SubResource("Gradient_1bvp3")
+fill_from = Vector2(0.5, 0)
+fill_to = Vector2(0.5, 1)
+
+[sub_resource type="PanoramaSkyMaterial" id="PanoramaSkyMaterial_7mycd"]
+panorama = SubResource("GradientTexture2D_lquwl")
+
+[sub_resource type="Sky" id="Sky_272bh"]
+sky_material = SubResource("PanoramaSkyMaterial_7mycd")
+
+[resource]
+background_mode = 2
+sky = SubResource("Sky_272bh")
+ambient_light_source = 3
+ambient_light_energy = 6.9
+reflected_light_source = 2
+tonemap_mode = 3
+glow_enabled = true
+glow_levels/1 = 2.76
+glow_levels/4 = 1.39
+glow_levels/6 = 1.43
+glow_intensity = 2.4
+glow_strength = 1.2
+glow_bloom = 0.01
+glow_hdr_threshold = 0.6

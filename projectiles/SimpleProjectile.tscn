@@ -1,0 +1,22 @@
+[gd_scene format=3 uid="uid://b8j01rb3028ke"]
+
+[ext_resource type="Script" uid="uid://42p8gyd1u27t" path="res://projectiles/SimpleProjectile.gd" id="1_pj5cm"]
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_h6jue"]
+albedo_color = Color(4.2364087, 4.22567, 5.054, 1)
+
+[sub_resource type="SphereMesh" id="SphereMesh_nulnj"]
+material = SubResource("StandardMaterial3D_h6jue")
+radius = 0.3
+height = 0.6
+radial_segments = 8
+rings = 8
+
+[node name="SimpleProjectile" type="Node3D" unique_id=769899107]
+script = ExtResource("1_pj5cm")
+gravity = 0.0
+y_offset = 0.25
+projectile_speed = 80.0
+
+[node name="MeshInstance3D" type="MeshInstance3D" parent="." unique_id=244362647]
+mesh = SubResource("SphereMesh_nulnj")

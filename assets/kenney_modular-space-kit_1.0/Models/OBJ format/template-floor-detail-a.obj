@@ -1,0 +1,38 @@
+# Created by Kenney (www.kenney.nl)
+
+mtllib template-floor-detail-a.mtl
+
+g template-floor-detail-a
+
+v 2 0 -2 1 1 1
+v 2 0 2 1 1 1
+v -2 0 -2 1 1 1
+v -2 0 2 1 1 1
+
+vn 0 1 0
+vn 0 -1 0
+
+vt 0.87 0.995
+vt 0.8699999 0.7550001
+vt 0.6300001 0.995
+vt 0.6300002 0.7550001
+
+usemtl colormap
+
+f 3/3/1 2/2/1 1/1/1
+f 2/2/1 3/3/1 4/4/1
+f 1/1/2 2/2/2 3/3/2
+f 4/4/2 3/3/2 2/2/2
+
+g template-floor-detail-a
+
+
+
+
+usemtl colormap
+
+f 3/3/1 2/2/1 1/1/1
+f 2/2/1 3/3/1 4/4/1
+f 1/1/2 2/2/2 3/3/2
+f 4/4/2 3/3/2 2/2/2
+

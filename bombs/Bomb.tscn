@@ -1,0 +1,153 @@
+[gd_scene format=3 uid="uid://u5a35jibmnhm"]
+
+[ext_resource type="Script" uid="uid://c4k6vv71i06e3" path="res://bombs/Bomb.gd" id="1_kerbu"]
+[ext_resource type="PackedScene" uid="uid://beq8ti4tdepee" path="res://assets/kenney_blaster-kit_2.1/Models/GLB format/grenade-b.glb" id="2_ttsdt"]
+[ext_resource type="Script" uid="uid://bn6uolljecpu1" path="res://components/Animator.gd" id="3_ttsdt"]
+[ext_resource type="Shader" uid="uid://o4l5kct7m0ud" path="res://shaders/black_hole_3d.gdshader" id="4_vxeqc"]
+
+[sub_resource type="Gradient" id="Gradient_vxeqc"]
+offsets = PackedFloat32Array(0, 0.31978798, 0.37279153, 0.77208483)
+colors = PackedColorArray(7.1599684, 0, 0, 1, 1, 0.27450982, 0.17254902, 1, 0.4487121, 0.4487121, 0.4487121, 1, 0, 0, 0, 0.17254902)
+
+[sub_resource type="GradientTexture1D" id="GradientTexture1D_u5pi3"]
+gradient = SubResource("Gradient_vxeqc")
+use_hdr = true
+
+[sub_resource type="Curve" id="Curve_ttsdt"]
+_data = [Vector2(0, 1), 0.0, -0.2873437, 0, 0, Vector2(1, 0), -2.5617821, 0.0, 0, 0]
+point_count = 2
+
+[sub_resource type="CurveTexture" id="CurveTexture_vxeqc"]
+curve = SubResource("Curve_ttsdt")
+
+[sub_resource type="ParticleProcessMaterial" id="ParticleProcessMaterial_5atqy"]
+emission_shape = 1
+emission_sphere_radius = 0.4
+use_rotation_3d = true
+rotation_3d_min = Vector3(0, 0, 0)
+rotation_3d_max = Vector3(360, 360, 360)
+inherit_velocity_ratio = 0.063
+direction = Vector3(0, 0, 0)
+gravity = Vector3(0, 0, 0)
+scale_curve = SubResource("CurveTexture_vxeqc")
+color_ramp = SubResource("GradientTexture1D_u5pi3")
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_kerbu"]
+transparency = 1
+shading_mode = 0
+specular_mode = 2
+vertex_color_use_as_albedo = true
+disable_receive_shadows = true
+
+[sub_resource type="BoxMesh" id="BoxMesh_5qgqx"]
+material = SubResource("StandardMaterial3D_kerbu")
+size = Vector3(0.08, 0.08, 0.08)
+
+[sub_resource type="FastNoiseLite" id="FastNoiseLite_vxeqc"]
+noise_type = 0
+frequency = 0.0057
+
+[sub_resource type="NoiseTexture2D" id="NoiseTexture2D_u5pi3"]
+generate_mipmaps = false
+noise = SubResource("FastNoiseLite_vxeqc")
+seamless = true
+
+[sub_resource type="ShaderMaterial" id="ShaderMaterial_xge4v"]
+render_priority = 0
+shader = ExtResource("4_vxeqc")
+shader_parameter/radius = 0.0
+shader_parameter/noise = SubResource("NoiseTexture2D_u5pi3")
+shader_parameter/spin = 0.0
+shader_parameter/shadow_asymmetry = 0.5
+shader_parameter/shadow_oblateness = 0.5
+shader_parameter/frame_drag_strength = 0.5
+shader_parameter/doppler_beaming = 0.5
+shader_parameter/warp_falloff = 8.0
+shader_parameter/warp_strength = 0.8510000404225
+shader_parameter/warp_inner_edge = 0.0
+shader_parameter/color_core = Color(0.88, 0.96, 1, 1)
+shader_parameter/brightness_core = 22.4410010659475
+shader_parameter/color_hot = Color(0.9137431, 0.4046302, 0.4352477, 1)
+shader_parameter/brightness_hot = 10.0
+shader_parameter/color_mid = Color(0.66865414, 0.31761196, 0.20452937, 1)
+shader_parameter/brightness_mid = 6.5
+shader_parameter/color_cool = Color(0.4378293, 0.5251648, 0, 1)
+shader_parameter/brightness_cool = 0.58400002774
+shader_parameter/color_outer = Color(0.95, 0.55, 0.15, 1)
+shader_parameter/brightness_outer = 2.2
+shader_parameter/color_edge = Color(0.7, 0.08, 0.02, 1)
+shader_parameter/brightness_edge = 3.2350001536625
+shader_parameter/gradient_stop0 = 0.08
+shader_parameter/gradient_stop1 = 0.25
+shader_parameter/gradient_stop2 = 0.55
+shader_parameter/gradient_stop3 = 0.8
+shader_parameter/color_saturation = 1.5
+shader_parameter/grav_redshift_strength = 1.3790000655025
+shader_parameter/turbulence_strength = 0.28
+shader_parameter/turbulence_scale = 8.0
+shader_parameter/turbulence_speed = 1.1710000556225
+shader_parameter/density_heat_strength = 0.55
+shader_parameter/density_heat_power = 0.3
+shader_parameter/rs = 1.38600006257512
+
+[sub_resource type="SphereMesh" id="SphereMesh_ur00h"]
+material = SubResource("ShaderMaterial_xge4v")
+radius = 8.0
+height = 4.0
+radial_segments = 32
+rings = 16
+is_hemisphere = true
+
+[node name="Bomb" type="Node3D" unique_id=1479396779 node_paths=PackedStringArray("grenade")]
+script = ExtResource("1_kerbu")
+grenade = NodePath("Grenade")
+
+[node name="Grenade" parent="." unique_id=1971495512 instance=ExtResource("2_ttsdt")]
+transform = Transform3D(5, 0, 0, 0, 5, 0, 0, 0, 5, 0, -0.5, 0)
+
+[node name="grenade-b" parent="Grenade" index="0" unique_id=1433656395]
+layers = 4
+
+[node name="Animator" type="Node" parent="Grenade" unique_id=1227333816]
+script = ExtResource("3_ttsdt")
+mode = 7
+speed = 2.0
+_editor_origin = Vector3(0, -0.5, 0)
+_editor_transform = Transform3D(5, 0, 0, 0, 5, 0, 0, 0, 5, 0, -0.5, 0)
+metadata/_custom_type_script = "uid://bn6uolljecpu1"
+
+[node name="BombTrail" type="GPUParticles3D" parent="." unique_id=747251470]
+transform = Transform3D(1, 0, 0, 0, -4.371139e-08, -1, 0, 1, -4.371139e-08, 0, 0.24964029, -4.22281e-08)
+cast_shadow = 0
+gi_mode = 0
+emitting = false
+amount = 2000
+lifetime = 0.5
+randomness = 1.0
+fixed_fps = 120
+process_material = SubResource("ParticleProcessMaterial_5atqy")
+draw_pass_1 = SubResource("BoxMesh_5qgqx")
+
+[node name="BlackHole" type="Node3D" parent="." unique_id=1914914808]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -0.22513217, 0)
+visible = false
+metadata/_edit_group_ = true
+
+[node name="BlackHoleMesh" type="MeshInstance3D" parent="BlackHole" unique_id=14700836]
+unique_name_in_owner = true
+transform = Transform3D(0.25, 0, 0, 0, 0.25, 0, 0, 0, 0.25, 0, 0, 0)
+cast_shadow = 0
+mesh = SubResource("SphereMesh_ur00h")
+
+[node name="OmniLight3D" type="OmniLight3D" parent="." unique_id=1893421961]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.71631277, 0)
+light_color = Color(1, 0.36616665, 0.31416526, 1)
+light_energy = 8.558
+light_cull_mask = 4294967291
+shadow_enabled = true
+shadow_caster_mask = 4294967291
+omni_range = 10.0
+omni_attenuation = 0.25
+omni_shadow_mode = 0
+
+[editable path="Grenade"]

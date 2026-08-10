@@ -1,0 +1,13 @@
+[gd_resource type="Resource" script_class="ProjectileAbility" format=3 uid="uid://b8baei50x5ffx"]
+
+[ext_resource type="Script" uid="uid://ccsl3vs1sry8u" path="res://projectiles/ProjectileAbility.gd" id="1_nvg1v"]
+
+[resource]
+script = ExtResource("1_nvg1v")
+radius = 0.9
+damage = 0.0
+force = 0.0
+damage_per_second = 2.0
+contagion_type = 256
+contagion_duration = 0.05
+metadata/_custom_type_script = "uid://ccsl3vs1sry8u"

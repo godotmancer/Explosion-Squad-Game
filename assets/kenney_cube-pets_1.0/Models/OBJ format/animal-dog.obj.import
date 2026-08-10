@@ -1,0 +1,25 @@
+[remap]
+
+importer="wavefront_obj"
+importer_version=1
+type="Mesh"
+uid="uid://bleuy4iubm148"
+path="res://.godot/imported/animal-dog.obj-a86dddd5c5c599d65e0a19b5ca988b01.mesh"
+
+[deps]
+
+files=["res://.godot/imported/animal-dog.obj-a86dddd5c5c599d65e0a19b5ca988b01.mesh"]
+
+source_file="res://assets/kenney_cube-pets_1.0/Models/OBJ format/animal-dog.obj"
+dest_files=["res://.godot/imported/animal-dog.obj-a86dddd5c5c599d65e0a19b5ca988b01.mesh", "res://.godot/imported/animal-dog.obj-a86dddd5c5c599d65e0a19b5ca988b01.mesh"]
+
+[params]
+
+generate_tangents=true
+generate_lods=true
+generate_shadow_mesh=true
+generate_lightmap_uv2=false
+generate_lightmap_uv2_texel_size=0.2
+scale_mesh=Vector3(1, 1, 1)
+offset_mesh=Vector3(0, 0, 0)
+force_disable_mesh_compression=false

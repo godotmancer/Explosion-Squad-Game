@@ -1,0 +1,18 @@
+**/.DS_Store
+.DS_Store
+**/.vscode
+.vscode
+
+# Godastic Application Exports
+Exports/**
+
+# Local user overrides
+override.cfg
+
+# Development data ignores
+**/.godot
+**/bin
+**/.idea
+**/venv
+.idea
+Session.vim

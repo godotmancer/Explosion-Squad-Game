@@ -1,0 +1,14 @@
+[remap]
+
+importer="glsl"
+type="RDShaderFile"
+uid="uid://jkbxyt4incp4"
+path="res://.godot/imported/projectile_compute.glsl-b6d8456ed63221e3d2f7f6c01aaad6c3.res"
+
+[deps]
+
+source_file="res://compute_shaders/projectile_compute.glsl"
+dest_files=["res://.godot/imported/projectile_compute.glsl-b6d8456ed63221e3d2f7f6c01aaad6c3.res"]
+
+[params]
+

@@ -1,0 +1,11 @@
+[gd_resource type="StandardMaterial3D" format=3 uid="uid://by81x2rw3aocy"]
+
+[ext_resource type="Texture2D" uid="uid://s57oqxs8ac2f" path="res://assets/kenney_modular-space-kit_1.0/Models/GLB format/Textures/colormap.png" id="1_ooxbo"]
+
+[resource]
+resource_name = "colormap"
+cull_mode = 2
+albedo_texture = ExtResource("1_ooxbo")
+emission_enabled = true
+emission = Color(0.023529412, 0.1254902, 0.6901961, 1)
+emission_energy_multiplier = 0.0

@@ -1,0 +1,51 @@
+[gd_scene format=3 uid="uid://coyvpfanfk8dw"]
+
+[ext_resource type="Script" uid="uid://5rvusf5o3e8d" path="res://visuals/DeathFxScene.gd" id="1_rq6n3"]
+
+[sub_resource type="Curve" id="Curve_rq6n3"]
+bake_resolution = 256
+_data = [Vector2(0, 1), 0.0, 0.0, 0, 0, Vector2(1, 0), -2.8566337, 0.0, 0, 0]
+point_count = 2
+
+[sub_resource type="CurveTexture" id="CurveTexture_rq6n3"]
+width = 512
+curve = SubResource("Curve_rq6n3")
+
+[sub_resource type="ParticleProcessMaterial" id="ParticleProcessMaterial_kej81"]
+lifetime_randomness = 0.1
+angle_min = 1.0728835e-05
+angle_max = 360.00003
+direction = Vector3(0, 1, 0)
+spread = 20.0
+initial_velocity_min = 18.93
+initial_velocity_max = 58.17
+gravity = Vector3(0, -120, 0)
+damping_min = 17.666
+damping_max = 32.808002
+scale_curve = SubResource("CurveTexture_rq6n3")
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_6xqum"]
+shading_mode = 0
+albedo_color = Color(1.299, 0, 0.116, 1)
+disable_receive_shadows = true
+
+[sub_resource type="BoxMesh" id="BoxMesh_rq6n3"]
+material = SubResource("StandardMaterial3D_6xqum")
+size = Vector3(0.2, 0.2, 0.2)
+
+[node name="DeathFxScene" type="Node3D" unique_id=1598830378]
+transform = Transform3D(0.5, 0, 0, 0, 0.5, 0, 0, 0, 0.5, 0, 0, 0)
+script = ExtResource("1_rq6n3")
+
+[node name="GPUParticles3D" type="GPUParticles3D" parent="." unique_id=1639275094]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -0.4270717, 0)
+emitting = false
+amount = 30
+lifetime = 0.4
+one_shot = true
+explosiveness = 0.83
+randomness = 0.3
+fixed_fps = 60
+visibility_aabb = AABB(-5, -4.385, -5, 10, 8.823, 10)
+process_material = SubResource("ParticleProcessMaterial_kej81")
+draw_pass_1 = SubResource("BoxMesh_rq6n3")

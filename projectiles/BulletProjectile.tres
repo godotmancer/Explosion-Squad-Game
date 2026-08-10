@@ -1,0 +1,9 @@
+[gd_resource type="Resource" script_class="ProjectileAbility" format=3 uid="uid://b3mw22xk04wej"]
+
+[ext_resource type="Script" uid="uid://ccsl3vs1sry8u" path="res://projectiles/ProjectileAbility.gd" id="1_02deo"]
+
+[resource]
+script = ExtResource("1_02deo")
+radius = 0.9
+damage = 50.0
+metadata/_custom_type_script = "uid://ccsl3vs1sry8u"

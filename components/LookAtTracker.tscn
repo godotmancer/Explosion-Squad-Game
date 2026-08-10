@@ -1,0 +1,6 @@
+[gd_scene format=3 uid="uid://bhvsdj65xleeg"]
+
+[ext_resource type="Script" uid="uid://c8cmujrxj2dq7" path="res://components/LookAtTracker.gd" id="1_tp8wx"]
+
+[node name="LookAtTracker" type="Node" unique_id=1125097018]
+script = ExtResource("1_tp8wx")

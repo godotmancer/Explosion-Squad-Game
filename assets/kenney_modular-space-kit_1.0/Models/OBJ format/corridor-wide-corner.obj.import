@@ -1,0 +1,25 @@
+[remap]
+
+importer="wavefront_obj"
+importer_version=1
+type="Mesh"
+uid="uid://pehhxolo43va"
+path="res://.godot/imported/corridor-wide-corner.obj-a89ac6c135dc3765a46daaef0e845bd3.mesh"
+
+[deps]
+
+files=["res://.godot/imported/corridor-wide-corner.obj-a89ac6c135dc3765a46daaef0e845bd3.mesh"]
+
+source_file="res://assets/kenney_modular-space-kit_1.0/Models/OBJ format/corridor-wide-corner.obj"
+dest_files=["res://.godot/imported/corridor-wide-corner.obj-a89ac6c135dc3765a46daaef0e845bd3.mesh", "res://.godot/imported/corridor-wide-corner.obj-a89ac6c135dc3765a46daaef0e845bd3.mesh"]
+
+[params]
+
+generate_tangents=true
+generate_lods=true
+generate_shadow_mesh=true
+generate_lightmap_uv2=false
+generate_lightmap_uv2_texel_size=0.2
+scale_mesh=Vector3(1, 1, 1)
+offset_mesh=Vector3(0, 0, 0)
+force_disable_mesh_compression=false

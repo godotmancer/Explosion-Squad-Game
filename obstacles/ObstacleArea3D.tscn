@@ -1,0 +1,9 @@
+[gd_scene format=3 uid="uid://5io864owlfur"]
+
+[ext_resource type="Script" uid="uid://h8rsffid2vbl" path="res://obstacles/ObstacleArea3d.gd" id="1_hnage"]
+
+[node name="ObstacleArea3d" type="Area3D" unique_id=577551381]
+input_ray_pickable = false
+monitoring = false
+monitorable = false
+script = ExtResource("1_hnage")

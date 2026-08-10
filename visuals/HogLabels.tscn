@@ -1,0 +1,8 @@
+[gd_scene format=3 uid="uid://b0j6wj3dwfmnd"]
+
+[ext_resource type="Script" uid="uid://c5th6k57hnflb" path="res://visuals/HogLabels.gd" id="1_me8xl"]
+[ext_resource type="PackedScene" uid="uid://bvdq3n0uhyqud" path="res://visuals/HogStateLabel.tscn" id="2_mi2da"]
+
+[node name="HogLabels" type="Node3D" unique_id=1124465647]
+script = ExtResource("1_me8xl")
+label_template = ExtResource("2_mi2da")

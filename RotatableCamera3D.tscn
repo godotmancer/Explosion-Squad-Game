@@ -1,0 +1,13 @@
+[gd_scene format=3 uid="uid://c6y8g3yax2l0m"]
+
+[ext_resource type="Environment" uid="uid://bjeekb1y7857d" path="res://resources/camera_3d_environment.tres" id="1_vwv82"]
+[ext_resource type="Script" uid="uid://coug0lhn240dn" path="res://RotatableCamera3D.gd" id="2_qm67a"]
+
+[node name="Camera3D" type="Camera3D" unique_id=1248314386]
+transform = Transform3D(0.99970174, 0.0018200148, -0.024349004, -0.0003356735, 0.99814814, 0.060826585, 0.024414629, -0.060800284, 0.99785113, 0, 0, 0)
+environment = ExtResource("1_vwv82")
+current = true
+script = ExtResource("2_qm67a")
+distance = 150.0
+min_distance = 70.0
+max_distance = 400.0

@@ -1,0 +1,130 @@
+[gd_scene format=3 uid="uid://dhkf5io2bx625"]
+
+[ext_resource type="PackedScene" uid="uid://c6y8g3yax2l0m" path="res://RotatableCamera3D.tscn" id="1_4cjwe"]
+
+[sub_resource type="Gradient" id="Gradient_8ksso"]
+interpolation_mode = 2
+interpolation_color_space = 2
+offsets = PackedFloat32Array(0.3539519, 0.6202749, 0.7250859, 0.9347079)
+colors = PackedColorArray(0, 0.080165364, 0.036433168, 1, 0.14989153, 0.3609896, 0.6458661, 1, 0.44313726, 0.2784314, 0.81960785, 1, 1.0516405, 0.69005245, 1.8905251, 1)
+
+[sub_resource type="GradientTexture2D" id="GradientTexture2D_pqwbw"]
+gradient = SubResource("Gradient_8ksso")
+use_hdr = true
+fill_from = Vector2(0.5, 1)
+fill_to = Vector2(0.5, 0)
+
+[sub_resource type="PanoramaSkyMaterial" id="PanoramaSkyMaterial_inrkk"]
+panorama = SubResource("GradientTexture2D_pqwbw")
+energy_multiplier = 0.5
+
+[sub_resource type="Sky" id="Sky_5i5gl"]
+sky_material = SubResource("PanoramaSkyMaterial_inrkk")
+
+[sub_resource type="Environment" id="Environment_mqqe2"]
+background_mode = 2
+sky = SubResource("Sky_5i5gl")
+ambient_light_source = 3
+ambient_light_color = Color(0.13501206, 0.13501206, 0.13501206, 1)
+ambient_light_sky_contribution = 0.6
+reflected_light_source = 2
+tonemap_mode = 3
+glow_enabled = true
+glow_levels/1 = 2.76
+glow_levels/4 = 1.39
+glow_levels/6 = 1.43
+glow_intensity = 2.4
+glow_strength = 1.2
+glow_bloom = 0.01
+glow_hdr_threshold = 0.69
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_0wa2n"]
+size = Vector3(8, 0.5307617, 14)
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_hwqoo"]
+specular_mode = 2
+disable_ambient_light = true
+disable_fog = true
+disable_specular_occlusion = true
+albedo_color = Color(0.2639048, 0.4779967, 0.46978652, 1)
+grow_amount = 1.675
+
+[sub_resource type="QuadMesh" id="QuadMesh_nq2io"]
+material = SubResource("StandardMaterial3D_hwqoo")
+size = Vector2(8, 14)
+
+[sub_resource type="WorldBoundaryShape3D" id="WorldBoundaryShape3D_mjfy6"]
+plane = Plane(0, 0, -1, 0)
+
+[sub_resource type="WorldBoundaryShape3D" id="WorldBoundaryShape3D_uiabs"]
+plane = Plane(0, 0, 1, 0)
+
+[sub_resource type="WorldBoundaryShape3D" id="WorldBoundaryShape3D_cnsc3"]
+plane = Plane(-1, 0, 0, 0)
+
+[sub_resource type="WorldBoundaryShape3D" id="WorldBoundaryShape3D_j0lhm"]
+plane = Plane(1, 0, 0, 0)
+
+[node name="Basic3DScene" type="Node" unique_id=1357049663]
+
+[node name="DirectionalLight3D" type="DirectionalLight3D" parent="." unique_id=344885326]
+transform = Transform3D(0.9986295, -0.051192295, 0.010881256, 0, 0.20791167, 0.9781476, -0.05233596, -0.9768071, 0.20762673, 0, 3.716581, 0.7890949)
+light_bake_mode = 0
+shadow_enabled = true
+directional_shadow_max_distance = 30.0
+
+[node name="RotatableCamera3D" parent="." unique_id=1248314386 instance=ExtResource("1_4cjwe")]
+transform = Transform3D(-1, -1.4696596e-07, 3.4651688e-08, 0, 0.22948776, 0.97331154, -1.509958e-07, 0.97331154, -0.22948776, 4.888534e-12, 13.016794, -3.8750575)
+environment = SubResource("Environment_mqqe2")
+fov = 52.6
+target = Vector3(-4.6341717e-07, 0, -0.80595183)
+distance = 13.373718
+min_distance = 0.0
+max_distance = 800.0
+
+[node name="WorldBounds" type="Node" parent="." unique_id=1382453810]
+
+[node name="Ground" type="StaticBody3D" parent="WorldBounds" unique_id=167985671]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -0.25, 0)
+collision_layer = 4
+collision_mask = 7
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="WorldBounds/Ground" unique_id=1249088641]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -0.24789909, 0)
+shape = SubResource("BoxShape3D_0wa2n")
+
+[node name="MeshInstance3D" type="MeshInstance3D" parent="WorldBounds/Ground" unique_id=1348391863]
+transform = Transform3D(1, 0, 0, 0, -4.371139e-08, 1, 0, -1, -4.371139e-08, 0, 0, 0)
+mesh = SubResource("QuadMesh_nq2io")
+
+[node name="WorldLimitsRear" type="StaticBody3D" parent="WorldBounds" unique_id=1061302725]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 7)
+collision_layer = 4
+collision_mask = 7
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="WorldBounds/WorldLimitsRear" unique_id=143290246]
+shape = SubResource("WorldBoundaryShape3D_mjfy6")
+
+[node name="WorldLimitsFront" type="StaticBody3D" parent="WorldBounds" unique_id=868272257]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, -7)
+collision_layer = 4
+collision_mask = 7
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="WorldBounds/WorldLimitsFront" unique_id=1713546016]
+shape = SubResource("WorldBoundaryShape3D_uiabs")
+
+[node name="WorldLimitsLeft" type="StaticBody3D" parent="WorldBounds" unique_id=610799023]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 4, 0, -6.875)
+collision_layer = 4
+collision_mask = 7
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="WorldBounds/WorldLimitsLeft" unique_id=1000351349]
+shape = SubResource("WorldBoundaryShape3D_cnsc3")
+
+[node name="WorldLimitsRight" type="StaticBody3D" parent="WorldBounds" unique_id=2092836655]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -4, 0, -6.875)
+collision_layer = 4
+collision_mask = 7
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="WorldBounds/WorldLimitsRight" unique_id=133308132]
+shape = SubResource("WorldBoundaryShape3D_j0lhm")

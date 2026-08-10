@@ -1,0 +1,11 @@
+[gd_scene format=3 uid="uid://bvdq3n0uhyqud"]
+
+[ext_resource type="FontFile" uid="uid://dedxfksbihn66" path="res://assets/fonts/Exo2.0-Bold.otf" id="1_n07db"]
+
+[node name="HogStateLabel" type="Label3D" unique_id=472323114]
+pixel_size = 0.01
+billboard = 2
+text = "???"
+font = ExtResource("1_n07db")
+font_size = 24
+outline_size = 7

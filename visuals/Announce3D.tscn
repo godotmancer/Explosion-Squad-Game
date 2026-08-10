@@ -1,0 +1,32 @@
+[gd_scene format=3 uid="uid://daoo6nkcacj7m"]
+
+[ext_resource type="FontFile" uid="uid://bm3pykukom20d" path="res://assets/fonts/Exo2.0-ExtraBold.otf" id="1_4knpy"]
+[ext_resource type="Script" uid="uid://bwgft0o0j0pc0" path="res://visuals/Announce3D.gd" id="1_qr7i3"]
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_qr7i3"]
+resource_local_to_scene = true
+disable_fog = true
+albedo_color = Color(0.663, 1, 0.224, 1)
+emission_enabled = true
+emission = Color(0.663, 1, 0.224, 1)
+emission_energy_multiplier = 16.0
+disable_receive_shadows = true
+billboard_mode = 1
+billboard_keep_scale = true
+
+[sub_resource type="TextMesh" id="TextMesh_h0nsx"]
+resource_local_to_scene = true
+text = "1000"
+font = ExtResource("1_4knpy")
+line_spacing = -5.0
+pixel_size = 0.1
+
+[node name="Announce3d" type="Node3D" unique_id=1398684587]
+script = ExtResource("1_qr7i3")
+move_speed = 20.0
+target_depth = 10.0
+
+[node name="TextMesh3D" type="MeshInstance3D" parent="." unique_id=1693002139]
+material_override = SubResource("StandardMaterial3D_qr7i3")
+cast_shadow = 0
+mesh = SubResource("TextMesh_h0nsx")

@@ -1,0 +1,30 @@
+[gd_scene format=3 uid="uid://cp2b01axdkacc"]
+
+[ext_resource type="Script" uid="uid://b3xao8wyvijeg" path="res://visuals/DrawableGround.gd" id="1_rpb6a"]
+[ext_resource type="Texture2D" uid="uid://bitcmbqx5lgfv" path="res://assets/explosion64x64.png" id="2_t3nqv"]
+[ext_resource type="Texture2D" uid="uid://n42v2py88vib" path="res://assets/star-16x16.png" id="3_07txh"]
+
+[sub_resource type="DrawableTexture2D" id="DrawableTexture2D_ovyh0"]
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_o87t0"]
+albedo_texture = SubResource("DrawableTexture2D_ovyh0")
+
+[sub_resource type="QuadMesh" id="QuadMesh_4wncp"]
+size = Vector2(300, 300)
+subdivide_width = 2
+subdivide_depth = 2
+
+[node name="DrawableGround" type="Node3D" unique_id=1829754505]
+script = ExtResource("1_rpb6a")
+size = Vector2i(4096, 4096)
+color = Color(0, 0.40746152, 0.40746152, 1)
+explosion_texture = ExtResource("2_t3nqv")
+projectile_texture = ExtResource("3_07txh")
+explosions_per_frame = 200
+num_baked_rotations = 512
+
+[node name="MeshInstance3D" type="MeshInstance3D" parent="." unique_id=133751184]
+transform = Transform3D(1, 0, 0, 0, -4.371139e-08, 1, 0, -1, -4.371139e-08, -5.6951327, 0.0029149055, 2.8283796)
+material_override = SubResource("StandardMaterial3D_o87t0")
+cast_shadow = 0
+mesh = SubResource("QuadMesh_4wncp")

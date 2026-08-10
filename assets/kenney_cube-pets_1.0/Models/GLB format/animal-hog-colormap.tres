@@ -1,0 +1,9 @@
+[gd_resource type="StandardMaterial3D" format=3 uid="uid://cvhd2bf5npt50"]
+
+[ext_resource type="Texture2D" uid="uid://bvsiodc6h3xw5" path="res://assets/kenney_cube-pets_1.0/Models/GLB format/Textures/colormap.png" id="1_rgipx"]
+
+[resource]
+resource_name = "colormap"
+cull_mode = 2
+vertex_color_use_as_albedo = true
+albedo_texture = ExtResource("1_rgipx")
