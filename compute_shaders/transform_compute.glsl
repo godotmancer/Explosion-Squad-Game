@@ -36,6 +36,15 @@ const uint STATE_ON_FIRE  = 256u;   // bit 8
 const uint STATE_POISONED = 512u;   // bit 9
 const uint STATE_DRUNK    = 1024u;  // bit 10
 
+const float CONT_TIME_SCALE = 256.0; // must match physics_compute.glsl
+
+// Seconds of remaining contagion over which the tint fades back to white. Because a spread
+// hop only inherits a fraction of its infector's remaining time, hops far from the origin
+// start out already inside this window and therefore render faint — the outbreak visibly
+// weakens as it travels, rather than every infected hog looking equally lit until it snaps
+// back to white.
+const float CONTAGION_FADE_TIME = 1.5;
+
 layout(set = 0, binding = 0, std430) restrict readonly buffer BodiesBuffer {
     Body bodies[];
 };
@@ -87,21 +96,29 @@ void main() {
     // --- Instance color — contagion visual feedback ---
     // contagion_expiry_u is an absolute timestamp in 1/256 s units, so "infected" is
     // simply expiry > now, compared in fixed point.
-    float cr = 1.0, cg = 1.0, cb = 1.0;
-    if (b.contagion_expiry_u > uint(time * 256.0)) {
+    vec3 tint = vec3(1.0);
+    uint now_u = uint(time * CONT_TIME_SCALE);
+    if (b.contagion_expiry_u > now_u) {
+        vec3 contagion_tint = vec3(1.0);
         if ((b.state & STATE_ON_FIRE) != 0u) {
             float pulse = 0.8 + 0.2 * sin(time * 10.0 + float(id) * 0.7);
-            cr = pulse; cg = 0.25; cb = 0.0;
+            contagion_tint = vec3(pulse, 0.25, 0.0);
         } else if ((b.state & STATE_POISONED) != 0u) {
-            cr = 0.15; cg = 0.9; cb = 0.1;
+            contagion_tint = vec3(0.15, 0.9, 0.1);
         } else if ((b.state & STATE_DRUNK) != 0u) {
             float pulse = 0.7 + 0.3 * sin(time * 4.0 + float(id) * 1.3);
-            cr = 0.6 * pulse; cg = 0.05; cb = 0.9;
+            contagion_tint = vec3(0.6 * pulse, 0.05, 0.9);
         }
+
+        // Ease the tint out over the contagion's last CONTAGION_FADE_TIME seconds. Guarded
+        // by the branch above, so this subtraction cannot wrap.
+        float remaining = float(b.contagion_expiry_u - now_u) / CONT_TIME_SCALE;
+        float intensity = clamp(remaining / CONTAGION_FADE_TIME, 0.0, 1.0);
+        tint = mix(vec3(1.0), contagion_tint, intensity);
     }
-    data[offset + 12] = cr;
-    data[offset + 13] = cg;
-    data[offset + 14] = cb;
+    data[offset + 12] = tint.r;
+    data[offset + 13] = tint.g;
+    data[offset + 14] = tint.b;
     data[offset + 15] = 1.0;
 
     // --- Custom Data ---

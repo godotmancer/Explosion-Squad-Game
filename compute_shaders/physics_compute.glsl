@@ -217,10 +217,20 @@ const float GROUND_EPSILON = 0.01;  // Height threshold above y_offset to count 
 // Contagion behaviour
 const float FIRE_SPREAD_RADIUS    = 3.0;
 const float FIRE_SPREAD_PROB      = 0.012; // per-frame, per-neighbor probability
-const float FIRE_SPREAD_MAX_DUR   = 3.0;   // seconds: cap on the expiry handed to a neighbor
+const float FIRE_SPREAD_MAX_DUR   = 3.0;   // seconds: cap on the duration handed to a neighbor
 const float POISON_SPREAD_RADIUS  = 2.5;
 const float POISON_SPREAD_PROB    = 0.004;
 const float POISON_SPREAD_MAX_DUR = 5.0;
+
+// Fraction of our REMAINING contagion time passed on to a neighbour. Below 1.0 every hop is
+// weaker than the one that infected it, so an outbreak decays geometrically along the chain
+// and burns itself out instead of saturating every connected hog and then all clearing at
+// once. Mirrors FEAR_CONTAGION_DECAY, which does the same job for panic.
+const float CONTAGION_SPREAD_DECAY = 0.6;
+
+// Once the duration we could pass on falls below this, stop spreading altogether. Without a
+// floor the geometric decay would trail off into a long tail of imperceptible infections.
+const float CONTAGION_MIN_SPREAD_DUR = 0.35;
 const float DRUNK_JITTER_STR      = 10.5;  // velocity noise amplitude
 
 // Thresholds used when computing state bits — kept here so C# only needs to
@@ -375,15 +385,22 @@ void mark_damaged(inout Body b) {
 }
 
 // Probabilistically pass a contagion (fire/poison) to neighbour `i`.
-// On success, copies our expiry (never later than max_duration from now) and DPS to
-// the neighbour with atomics, so concurrent writers keep the strongest value.
+// The neighbour receives a FRACTION of our remaining time (CONTAGION_SPREAD_DECAY), capped
+// at max_duration, so each hop is strictly weaker than its infector and the outbreak dies
+// out on its own. DPS is inherited at full strength; only the window shrinks.
 void try_spread_contagion(int i, uint flag, float max_duration, float prob,
                           uint rnd_seed, uint self_expiry, uint self_dps) {
     if (hash(rnd_seed) >= prob) return;
 
-    uint now_u      = uint(time * CONT_TIME_SCALE);
-    uint max_expiry = uint((time + max_duration) * CONT_TIME_SCALE);
-    uint new_expiry = min(self_expiry, max_expiry);
+    uint now_u = uint(time * CONT_TIME_SCALE);
+    if (self_expiry <= now_u) return; // our own contagion lapsed; nothing left to pass on
+
+    // Guarded above, so this subtraction cannot wrap.
+    float self_remaining  = float(self_expiry - now_u) / CONT_TIME_SCALE;
+    float child_duration  = min(self_remaining * CONTAGION_SPREAD_DECAY, max_duration);
+    if (child_duration < CONTAGION_MIN_SPREAD_DUR) return;
+
+    uint new_expiry = now_u + uint(child_duration * CONT_TIME_SCALE);
 
     // Raise the expiry FIRST and keep atomicMax's return value. Whichever thread lifts a
     // lapsed expiry into the future is the unambiguous first infector, and only that thread
