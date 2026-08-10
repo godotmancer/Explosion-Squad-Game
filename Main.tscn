@@ -64,10 +64,12 @@ glow_blend_mode = 0
 glow_hdr_threshold = 0.69
 fog_enabled = true
 fog_mode = 1
-fog_light_color = Color(0.14772043, 0.45977253, 0.5532616, 1)
+fog_light_color = Color(0.10006944, 0.3390039, 0.4103927, 1)
 fog_density = 1.0
+fog_aerial_perspective = 0.833
+fog_depth_curve = 4.9245768
 fog_depth_begin = 0.0
-fog_depth_end = 141.1
+fog_depth_end = 291.1
 
 [sub_resource type="DrawableTexture2D" id="DrawableTexture2D_pumi7"]
 
