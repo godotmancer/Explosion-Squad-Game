@@ -198,7 +198,7 @@ public sealed partial class SquadMultiMeshInstance3D
     // damage_accum is a uint encoded as damage × 256 (matching DAMAGE_SCALE in the shader).
     var encoded = (uint)(damage * 256.0f);
     _ = BitConverter.TryWriteBytes(_damageEncodeBytes, encoded);
-    _ = _rd.BufferUpdate(_physicsBuffer, damageAccumOff, sizeof(uint), _damageEncodeBytes);
+    EnqueueGpuWrite(GpuTarget.Physics, damageAccumOff, _damageEncodeBytes);
   }
 
   private static long TriggerKey(int hogIndex, int zoneIndex) =>

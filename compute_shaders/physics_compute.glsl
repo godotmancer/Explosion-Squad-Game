@@ -380,9 +380,23 @@ void mark_damaged(inout Body b) {
 void try_spread_contagion(int i, uint flag, float max_duration, float prob,
                           uint rnd_seed, uint self_expiry, uint self_dps) {
     if (hash(rnd_seed) >= prob) return;
+
+    uint now_u      = uint(time * CONT_TIME_SCALE);
     uint max_expiry = uint((time + max_duration) * CONT_TIME_SCALE);
+    uint new_expiry = min(self_expiry, max_expiry);
+
+    // Raise the expiry FIRST and keep atomicMax's return value. Whichever thread lifts a
+    // lapsed expiry into the future is the unambiguous first infector, and only that thread
+    // retires the previous contagion's type bits and DPS. Doing the reset here rather than
+    // on expiry in main() is what makes it race-free: there is exactly one winner, and it
+    // clears before setting its own bit, so nothing can drop a bit it just set.
+    uint prev_expiry = atomicMax(bodies[i].contagion_expiry_u, new_expiry);
+    if (prev_expiry <= now_u && new_expiry > prev_expiry) {
+        atomicAnd(bodies[i].state, ~CONTAGION_MASK);
+        atomicAnd(bodies[i].dps_rate_u, 0u);
+    }
+
     atomicOr (bodies[i].state, flag);
-    atomicMax(bodies[i].contagion_expiry_u, min(self_expiry, max_expiry));
     atomicMax(bodies[i].dps_rate_u, self_dps);
 }
 
@@ -1010,23 +1024,21 @@ void main() {
         }
     }
 
-    // Re-read the expiry now that the neighbour scan is done: a thread in this same
-    // dispatch may have infected us since the tick above, and clearing the contagion
-    // bits below must not undo that.
-    uint merged_expiry  = atomicOr(bodies[id].contagion_expiry_u, 0u);
-    uint keep_contagion = merged_expiry > now_u ? CONTAGION_MASK : 0u;
-
     // Two atomics rather than a plain store: atomicAnd drops last frame's locomotion bits
-    // (and any contagion that has now lapsed), atomicOr sets this frame's. A neighbour's
-    // atomicOr landing anywhere in between survives both, which the previous
-    // `bodies[id] = self` struct store silently discarded.
-    atomicAnd(bodies[id].state, keep_contagion);
+    // while KEEPING the contagion bits, atomicOr sets this frame's. A neighbour's atomicOr
+    // landing anywhere in between survives both, which the previous `bodies[id] = self`
+    // struct store silently discarded.
+    //
+    // The contagion bits are deliberately never cleared here. Clearing them from this
+    // thread's view of the expiry is a race with real symptoms: a neighbour sets our type
+    // bit and raises our expiry inside this same dispatch, and if we read the expiry before
+    // its atomicMax lands we would wipe the bit while the raised expiry survived — leaving
+    // a hog burning invisibly (no bit for the colour to match) and unable to pass it on
+    // (spreads_* requires the bit). So the bits are sticky, every consumer gates on the
+    // expiry instead, and retiring a lapsed contagion's bits is the first infector's job
+    // (see try_spread_contagion above and projectile_compute).
+    atomicAnd(bodies[id].state, CONTAGION_MASK);
     atomicOr (bodies[id].state, st);
-
-    // Retire the DPS rate with the contagion so a later, weaker infection cannot inherit it.
-    if (keep_contagion == 0u) {
-        atomicAnd(bodies[id].dps_rate_u, 0u);
-    }
 
     // -------------------------------------------------------------------------
     // Field-by-field writeback.

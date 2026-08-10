@@ -86,7 +86,7 @@ public sealed partial class SquadMultiMeshInstance3D
     _ = (DrawableGround?.CallDeferred("draw_explosion", hit));
   }
 
-  private bool UpdateBombBuffer(float fdelta)
+  private void UpdateBombBuffer(float fdelta)
   {
     // Remove expired bombs
     for (var i = _activeBombs.Count - 1; i >= 0; i--)
@@ -107,7 +107,7 @@ public sealed partial class SquadMultiMeshInstance3D
     // nothing needs uploading when no bombs are active — stale GPU data is inert.
     if (_activeBombs.Count == 0)
     {
-      return false;
+      return;
     }
 
     // Build GPU data into pre-allocated staging buffer (zero alloc)
@@ -137,9 +137,8 @@ public sealed partial class SquadMultiMeshInstance3D
     }
 
     // Upload only the active slice (zero alloc)
-    var byteCount = (uint)(_activeBombs.Count * BOMB_STRIDE * sizeof(float));
-    Buffer.BlockCopy(_bombStaging, 0, _bombBytes, 0, (int)byteCount);
-    _ = _rd.BufferUpdate(_bombBuffer, 0, byteCount, _bombBytes);
-    return false; // buffer never grows
+    var byteCount = _activeBombs.Count * BOMB_STRIDE * sizeof(float);
+    Buffer.BlockCopy(_bombStaging, 0, _bombBytes, 0, byteCount);
+    EnqueueGpuWrite(GpuTarget.Bombs, 0, _bombBytes.AsSpan(0, byteCount));
   }
 }

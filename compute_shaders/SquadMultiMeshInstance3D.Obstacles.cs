@@ -331,30 +331,25 @@ public sealed partial class SquadMultiMeshInstance3D
     offset += OBSTACLE_STRIDE;
   }
 
-  private bool UpdateObstacleBuffer(float delta)
+  private void UpdateObstacleBuffer(float delta)
   {
     ExtractObstacles(delta);
     if (_numObstacles <= 0)
     {
-      return false;
+      return;
     }
 
-    var byteCount = (uint)(_numObstacles * OBSTACLE_STRIDE * sizeof(float));
+    var byteCount = _numObstacles * OBSTACLE_STRIDE * sizeof(float);
+
+    // Growth is queued ahead of the data write, so the write resolves to the new buffer.
+    // The obstacle data is rewritten in full every frame, so nothing needs preserving.
     if (byteCount > _obstacleBufferSize)
     {
-      _rd.FreeRid(_obstacleBuffer);
-      _physicsUniformSet = new Rid();
-      _obstacleBufferSize = byteCount;
-      // Copy to byte buffer and create new GPU buffer
-      Buffer.BlockCopy(_obstacleStaging, 0, _obstacleBytes, 0, (int)byteCount);
-      _obstacleBuffer = _rd.StorageBufferCreate(_obstacleBufferSize, _obstacleBytes);
-      return true;
+      EnqueueGrowObstacles(byteCount);
     }
 
-    Buffer.BlockCopy(_obstacleStaging, 0, _obstacleBytes, 0, (int)byteCount);
-    _ = _rd.BufferUpdate(_obstacleBuffer, 0, byteCount, _obstacleBytes);
-
-    return false;
+    Buffer.BlockCopy(_obstacleStaging, 0, _obstacleBytes, 0, byteCount);
+    EnqueueGpuWrite(GpuTarget.Obstacles, 0, _obstacleBytes.AsSpan(0, byteCount));
   }
 
   private static void FindCollisionShapes(Node node, List<CollisionShape3D> results)

@@ -56,7 +56,7 @@ public sealed partial class SquadMultiMeshInstance3D
       // killed the slot itself (its lifetime runs ~PROJ_LIFETIME_GRACE shorter),
       // but this guarantees a reclaimed slot can never keep colliding.
       var off = (uint)((i * PROJ_STRIDE * sizeof(float)) + (PROJ_FLAGS * sizeof(float)));
-      _ = _rd.BufferUpdate(_projBuffer, off, sizeof(float), _zeroFlagBytes);
+      EnqueueGpuWrite(GpuTarget.Projectiles, off, _zeroFlagBytes);
       _projFreeSlots.Enqueue(i);
     }
   }
@@ -149,12 +149,10 @@ public sealed partial class SquadMultiMeshInstance3D
         _projSlotUploadBytes.Length
       );
       var off = (uint)(slot * PROJ_STRIDE * sizeof(float));
-      _ = _rd.BufferUpdate(
-        _projBuffer,
-        off,
-        (uint)_projSlotUploadBytes.Length,
-        _projSlotUploadBytes
-      );
+      EnqueueGpuWrite(GpuTarget.Projectiles, off, _projSlotUploadBytes);
+      // Cleared here rather than at flush time: the drain runs later this same frame, and
+      // ReclaimGpuKilledProjectiles only reads the buffer earlier in the frame, so by the
+      // next read this upload has landed.
       _projPendingUpload[slot] = false;
     }
   }

@@ -101,9 +101,11 @@ public sealed partial class SquadMultiMeshInstance3D
     var hashSpirv = hashFile.GetSpirV();
     _hashShader = _rd.ShaderCreateFromSpirV(hashSpirv);
     _hashPipeline = _rd.ComputePipelineCreate(_hashShader);
+    VerifyPipeline(_hashPipeline, "spatial_hash_build.glsl");
     RebuildHashUniformSet();
 
     _physicsPipeline = _rd.ComputePipelineCreate(_physicsShader);
+    VerifyPipeline(_physicsPipeline, "physics_compute.glsl");
     RebuildPhysicsUniformSet(); // includes bindings 0-4 (bodies, obstacles, bombs, hash counts, hash entries)
 
     // --- Transform shader ---
@@ -117,12 +119,14 @@ public sealed partial class SquadMultiMeshInstance3D
 
     RebuildTransformUniformSet();
     _transformPipeline = _rd.ComputePipelineCreate(_transformShader);
+    VerifyPipeline(_transformPipeline, "transform_compute.glsl");
 
     // --- Projectile shader + buffer ---
     var projFile = GD.Load<RDShaderFile>("res://compute_shaders/projectile_compute.glsl");
     var projSpirv = projFile.GetSpirV();
     _projShader = _rd.ShaderCreateFromSpirV(projSpirv);
     _projPipeline = _rd.ComputePipelineCreate(_projShader);
+    VerifyPipeline(_projPipeline, "projectile_compute.glsl");
 
     _projBuffer = _rd.StorageBufferCreate(MAX_PROJECTILES * PROJ_STRIDE * sizeof(float));
 
@@ -138,6 +142,28 @@ public sealed partial class SquadMultiMeshInstance3D
     }
 
     RebuildProjectileUniformSet();
+  }
+
+  /// <summary>
+  /// Reports a compute pipeline that failed to build, which happens when its shader did not
+  /// compile — most often a stale or failed .glsl import.
+  ///
+  /// Worth failing loudly on, because Godot's only other signal is misleading: binding an
+  /// invalid pipeline is a silent no-op, so the next
+  /// <c>ComputeListSetPushConstant</c> is validated against whichever pipeline was bound
+  /// before it. That surfaces as a per-frame "This compute pipeline requires (N) bytes of
+  /// push constant data, supplied: (M)" naming byte counts from two unrelated shaders.
+  /// </summary>
+  private static void VerifyPipeline(Rid pipeline, string shaderFile)
+  {
+    if (!pipeline.IsValid)
+    {
+      GD.PushError(
+        $"Compute pipeline for {shaderFile} failed to build — its shader did not compile. "
+          + "Re-import it (godotx --path . --import) and check the import log. Until this is "
+          + "fixed, expect misleading push-constant size errors from the following shader."
+      );
+    }
   }
 
   private double _timeSinceOverflowSample;

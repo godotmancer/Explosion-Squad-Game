@@ -127,6 +127,12 @@ const uint PROJ_FLAG_IS_HOG = 4u;
 const uint BODY_FLAG_TELEPORT  = 1u;
 const uint BODY_FLAG_HIT_FRAME = 2u;
 
+// Contagion state bits (must match physics_compute.glsl)
+const uint STATE_ON_FIRE   = 256u;  // bit 8
+const uint STATE_POISONED  = 512u;  // bit 9
+const uint STATE_DRUNK     = 1024u; // bit 10
+const uint CONTAGION_MASK  = STATE_ON_FIRE | STATE_POISONED | STATE_DRUNK;
+
 // ---------------------------------------------------------------------------
 // Fixed-point scales (must match physics_compute.glsl)
 // ---------------------------------------------------------------------------
@@ -226,11 +232,21 @@ void main() {
 
                 // --- Contagion ---
                 if (proj.contagion != 0u && proj.contagion_dur > 0.0) {
-                    atomicOr(bodies[bi].state, proj.contagion);
                     // Absolute expiry, not a duration — physics_compute compares it against
-                    // `time` instead of counting it down.
-                    atomicMax(bodies[bi].contagion_expiry_u,
-                              uint((time + proj.contagion_dur) * CONT_TIME_SCALE));
+                    // `time` instead of counting it down. Raise it first and keep the
+                    // previous value: the thread that lifts a lapsed expiry into the future
+                    // is the first infector, and only it retires the old contagion's type
+                    // bits and DPS. Clearing before setting our own bit means we can never
+                    // drop a bit we just set.
+                    uint now_u      = uint(time * CONT_TIME_SCALE);
+                    uint new_expiry = uint((time + proj.contagion_dur) * CONT_TIME_SCALE);
+                    uint prev_expiry = atomicMax(bodies[bi].contagion_expiry_u, new_expiry);
+                    if (prev_expiry <= now_u && new_expiry > prev_expiry) {
+                        atomicAnd(bodies[bi].state, ~CONTAGION_MASK);
+                        atomicAnd(bodies[bi].dps_rate_u, 0u);
+                    }
+
+                    atomicOr(bodies[bi].state, proj.contagion);
                     if (proj.dps > 0.0) {
                         atomicMax(bodies[bi].dps_rate_u, uint(proj.dps * DAMAGE_SCALE));
                     }

@@ -632,14 +632,11 @@ public sealed partial class SquadMultiMeshInstance3D : MultiMeshInstance3D
     var fdelta = (float)delta;
     _time += fdelta;
 
-    // Update GPU buffers — rebuild uniform set once if either buffer grew
-    var needsRebuild = false;
-    needsRebuild |= UpdateObstacleBuffer(fdelta);
-    needsRebuild |= UpdateBombBuffer(fdelta);
-    if (needsRebuild)
-    {
-      RebuildPhysicsUniformSet();
-    }
+    // Stage GPU buffer contents. These only queue work now; nothing touches the
+    // RenderingDevice until FlushGpuCommands below, which also handles any buffer growth
+    // and the uniform-set rebuilds that growth implies.
+    UpdateObstacleBuffer(fdelta);
+    UpdateBombBuffer(fdelta);
 
     // Tick projectile lifetimes and upload newly-spawned projectiles
     UpdateProjectileLifetimes(fdelta);
@@ -677,6 +674,12 @@ public sealed partial class SquadMultiMeshInstance3D : MultiMeshInstance3D
     // -------------------------------------------------------------------------
     WriteHashBuildPush(NumBodies, YOffset);
     WriteProjectilePush(fdelta, _time);
+
+    // Apply every queued buffer mutation. This is the ONE place GPU buffers are written,
+    // and it must stay immediately before the dispatch: commands queued anywhere earlier
+    // (including from _Process and from last frame's trigger-zone pass) land here, in FIFO
+    // order, so the shaders below see exactly the state they saw before the queue existed.
+    FlushGpuCommands();
 
     // All GPU passes in a single command list — one Submit+Sync per frame.
     var cl = _rd.ComputeListBegin();
@@ -820,47 +823,21 @@ public sealed partial class SquadMultiMeshInstance3D : MultiMeshInstance3D
       };
     }
 
-    var newBytes = MemoryMarshal.Cast<GpuBody, byte>(newSquadsData.AsSpan()).ToArray();
+    var newBytes = MemoryMarshal.Cast<GpuBody, byte>(newSquadsData.AsSpan());
+    var writeOffset = (uint)(NumBodies * BODY_STRIDE * sizeof(float));
 
+    // Capacity growth is queued ahead of the body write so the write resolves to the grown
+    // buffer. _bodyCapacity is bumped here on the spot, so a second SpawnHogs later in the
+    // same frame sees the new capacity and does not queue a redundant growth.
     if (newCount > _bodyCapacity)
     {
       var newCapacity = Math.Max(newCount, _bodyCapacity * 2);
-      var oldBytes = _rd.BufferGetData(_physicsBuffer);
-
-      var mergedBytes = new byte[newCapacity * BODY_STRIDE * sizeof(float)];
-      var oldValidBytes = NumBodies * BODY_STRIDE * sizeof(float);
-      Buffer.BlockCopy(oldBytes, 0, mergedBytes, 0, oldValidBytes);
-      Buffer.BlockCopy(newBytes, 0, mergedBytes, oldValidBytes, newBytes.Length);
-
-      _rd.FreeRid(_physicsBuffer);
-      _physicsUniformSet = new Rid();
-      _transformUniformSet = new Rid();
-      _hashUniformSet = new Rid(); // uniform set referenced _physicsBuffer — now stale
-      _projUniformSet = new Rid(); // same reason
-
-      _physicsBuffer = _rd.StorageBufferCreate((uint)mergedBytes.Length, mergedBytes);
-
-      _rd.FreeRid(_transformBuffer);
-      _transformFloats = new float[newCapacity * INSTANCE_STRIDE];
-      var transformSize = (uint)(_transformFloats.Length * sizeof(float));
-      _transformBuffer = _rd.StorageBufferCreate(transformSize);
-
-      Multimesh.InstanceCount = newCapacity;
+      EnqueueGrowPhysics(newCapacity, (int)writeOffset);
       _bodyCapacity = newCapacity;
-
       Array.Resize(ref _hogStates, newCapacity);
-
-      RebuildPhysicsUniformSet();
-      RebuildTransformUniformSet();
-      RebuildHashUniformSet(); // _physicsBuffer pointer changed — hash build must see the new buffer
-      RebuildProjectileUniformSet(); // same reason
-    }
-    else
-    {
-      var writeOffset = (uint)(NumBodies * BODY_STRIDE * sizeof(float));
-      _ = _rd.BufferUpdate(_physicsBuffer, writeOffset, (uint)newBytes.Length, newBytes);
     }
 
+    EnqueueGpuWrite(GpuTarget.Physics, writeOffset, newBytes);
     NumBodies = newCount;
   }
 }
