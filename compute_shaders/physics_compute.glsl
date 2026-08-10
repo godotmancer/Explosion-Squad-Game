@@ -27,7 +27,12 @@ struct Body {
     uint  state;              // bitwise behaviour flags (see STATE_* constants)
     // projectile effect accumulators (written by projectile_compute, applied/cleared here)
     uint  damage_accum;       // 16  flat damage × 256 (atomicAdd)
-    uint  contagion_timer_u;  // 17  active contagion timer × 256 (atomicMax)
+    uint  contagion_expiry_u; // 17  ABSOLUTE time at which the contagion lapses × 256.
+                              //     Raised by atomicMax only (projectile_compute on hit,
+                              //     neighbour threads via try_spread_contagion) and never
+                              //     decremented, so "still infected" is a comparison
+                              //     against `time` rather than a read-modify-write that
+                              //     concurrent spreaders could lose.
     uint  dps_rate_u;         // 18  contagion DPS × 256 (atomicMax)
     uint  body_flags;         // 19  BODY_FLAG_TELEPORT | BODY_FLAG_HIT_FRAME
     float teleport_x;         // 20
@@ -212,8 +217,10 @@ const float GROUND_EPSILON = 0.01;  // Height threshold above y_offset to count 
 // Contagion behaviour
 const float FIRE_SPREAD_RADIUS    = 3.0;
 const float FIRE_SPREAD_PROB      = 0.012; // per-frame, per-neighbor probability
+const float FIRE_SPREAD_MAX_DUR   = 3.0;   // seconds: cap on the expiry handed to a neighbor
 const float POISON_SPREAD_RADIUS  = 2.5;
 const float POISON_SPREAD_PROB    = 0.004;
+const float POISON_SPREAD_MAX_DUR = 5.0;
 const float DRUNK_JITTER_STR      = 10.5;  // velocity noise amplitude
 
 // Thresholds used when computing state bits — kept here so C# only needs to
@@ -368,13 +375,14 @@ void mark_damaged(inout Body b) {
 }
 
 // Probabilistically pass a contagion (fire/poison) to neighbour `i`.
-// On success, copies our contagion timer (capped at max_ticks) and DPS to the
-// neighbour with atomics, so concurrent writers keep the strongest value.
-void try_spread_contagion(int i, uint flag, uint max_ticks, float prob,
-                          uint rnd_seed, uint self_timer, uint self_dps) {
+// On success, copies our expiry (never later than max_duration from now) and DPS to
+// the neighbour with atomics, so concurrent writers keep the strongest value.
+void try_spread_contagion(int i, uint flag, float max_duration, float prob,
+                          uint rnd_seed, uint self_expiry, uint self_dps) {
     if (hash(rnd_seed) >= prob) return;
+    uint max_expiry = uint((time + max_duration) * CONT_TIME_SCALE);
     atomicOr (bodies[i].state, flag);
-    atomicMax(bodies[i].contagion_timer_u, min(self_timer, max_ticks));
+    atomicMax(bodies[i].contagion_expiry_u, min(self_expiry, max_expiry));
     atomicMax(bodies[i].dps_rate_u, self_dps);
 }
 
@@ -458,17 +466,16 @@ void main() {
     self.damage_accum = 0u;
 
     // --- Contagion DPS tick ---
-    float cont_timer = float(self.contagion_timer_u) / CONT_TIME_SCALE;
-    if (cont_timer > 0.0) {
+    // No countdown to write: contagion_expiry_u is an absolute timestamp that only ever
+    // ratchets upward via atomicMax, so being infected is a comparison. The previous
+    // countdown form could not work — it decremented the local copy and then took
+    // max(local, stored) before the writeback, and `stored` was always the larger
+    // pre-decrement value, so the tick was discarded and contagion never lapsed.
+    uint now_u = uint(time * CONT_TIME_SCALE); // `time` in the same fixed point as the expiry
+    bool cont_active = self.contagion_expiry_u > now_u;
+    if (cont_active) {
         float dps = float(self.dps_rate_u) / DAMAGE_SCALE;
-        self.health   = max(0.0, self.health - dps * delta_time);
-        cont_timer   -= delta_time;
-        if (cont_timer <= 0.0) {
-            self.contagion_timer_u = 0u;
-            self.dps_rate_u        = 0u;
-        } else {
-            self.contagion_timer_u = uint(cont_timer * CONT_TIME_SCALE);
-        }
+        self.health = max(0.0, self.health - dps * delta_time);
     }
 
     // --- Teleport ---
@@ -503,7 +510,7 @@ void main() {
     self.body_flags &= ~BODY_FLAG_HIT_FRAME;
 
     // --- Drunk jitter ---
-    if ((self.state & STATE_DRUNK) != 0u && cont_timer > 0.0) {
+    if ((self.state & STATE_DRUNK) != 0u && cont_active) {
         float jt = time * 7.3 + float(id) * 1.7;
         self.velocity.x += sin(jt) * DRUNK_JITTER_STR * delta_time;
         self.velocity.y += cos(jt * 0.7) * DRUNK_JITTER_STR * delta_time;
@@ -523,6 +530,13 @@ void main() {
     vec2  contagion_bomb_origin = vec2(0.0);
 
     float closest_neighbor_dist = 9999.0; // Track nearest neighbor for sprint speed logic
+
+    // Loop-invariant: only a body whose contagion is still live may pass it on. Gating on
+    // cont_active as well as the bit matters because the bits in bodies[].state are cleared
+    // one frame later than the expiry lapses, so a bit-only test would let a burnt-out hog
+    // keep igniting its neighbours.
+    bool spreads_fire   = cont_active && (self.state & STATE_ON_FIRE)  != 0u;
+    bool spreads_poison = cont_active && (self.state & STATE_POISONED) != 0u;
 
     if (!is_falling) {
         // =====================================================================
@@ -648,15 +662,15 @@ void main() {
                         // ---- Contagion spread: fire and poison propagate to nearby bodies ----
                         // Per-frame random seed mixes id, neighbour index and time so no
                         // two pairs (and no two frames) roll the same probability.
-                        if ((self.state & STATE_ON_FIRE) != 0u && dist < FIRE_SPREAD_RADIUS) {
-                            try_spread_contagion(i, STATE_ON_FIRE, uint(3.0 * CONT_TIME_SCALE),
+                        if (spreads_fire && dist < FIRE_SPREAD_RADIUS) {
+                            try_spread_contagion(i, STATE_ON_FIRE, FIRE_SPREAD_MAX_DUR,
                                 FIRE_SPREAD_PROB, id * 31u + uint(i) + uint(time * 100.0 + 0.5),
-                                self.contagion_timer_u, self.dps_rate_u);
+                                self.contagion_expiry_u, self.dps_rate_u);
                         }
-                        if ((self.state & STATE_POISONED) != 0u && dist < POISON_SPREAD_RADIUS) {
-                            try_spread_contagion(i, STATE_POISONED, uint(5.0 * CONT_TIME_SCALE),
+                        if (spreads_poison && dist < POISON_SPREAD_RADIUS) {
+                            try_spread_contagion(i, STATE_POISONED, POISON_SPREAD_MAX_DUR,
                                 POISON_SPREAD_PROB, id * 47u + uint(i) * 3u + uint(time * 100.0 + 1.5),
-                                self.contagion_timer_u, self.dps_rate_u);
+                                self.contagion_expiry_u, self.dps_rate_u);
                         }
                     }
                 }
@@ -965,20 +979,11 @@ void main() {
     }
 
     // =========================================================================
-    // CONTAGION MERGE  (capture any spread written concurrently by neighbor threads)
-    // atomicAdd/atomicOr with 0 = coherent read without modification
-    // =========================================================================
-    self.contagion_timer_u = max(self.contagion_timer_u, atomicAdd(bodies[id].contagion_timer_u, 0u));
-    self.dps_rate_u        = max(self.dps_rate_u,        atomicAdd(bodies[id].dps_rate_u, 0u));
-    uint spread_contagion  = atomicOr(bodies[id].state, 0u) & CONTAGION_MASK;
-
-    // =========================================================================
     // BEHAVIOUR STATE  (bitwise flags — read back by C# via transform buffer)
     // =========================================================================
-    uint contagion_bits = self.contagion_timer_u > 0u
-        ? ((self.state & CONTAGION_MASK) | spread_contagion)
-        : 0u;
-
+    // st carries only the bits this thread owns. The contagion bits are NOT merged into
+    // it: they live in bodies[id].state, where neighbour threads in this same dispatch
+    // set them with atomicOr, and they are combined in memory below.
     uint st = 0u;
     if (self.health <= 0.0) {
         st |= STATE_DEAD;
@@ -1004,8 +1009,51 @@ void main() {
             st |= STATE_IDLE;
         }
     }
-    st |= contagion_bits;
-    self.state = st;
 
-    bodies[id] = self;
+    // Re-read the expiry now that the neighbour scan is done: a thread in this same
+    // dispatch may have infected us since the tick above, and clearing the contagion
+    // bits below must not undo that.
+    uint merged_expiry  = atomicOr(bodies[id].contagion_expiry_u, 0u);
+    uint keep_contagion = merged_expiry > now_u ? CONTAGION_MASK : 0u;
+
+    // Two atomics rather than a plain store: atomicAnd drops last frame's locomotion bits
+    // (and any contagion that has now lapsed), atomicOr sets this frame's. A neighbour's
+    // atomicOr landing anywhere in between survives both, which the previous
+    // `bodies[id] = self` struct store silently discarded.
+    atomicAnd(bodies[id].state, keep_contagion);
+    atomicOr (bodies[id].state, st);
+
+    // Retire the DPS rate with the contagion so a later, weaker infection cannot inherit it.
+    if (keep_contagion == 0u) {
+        atomicAnd(bodies[id].dps_rate_u, 0u);
+    }
+
+    // -------------------------------------------------------------------------
+    // Field-by-field writeback.
+    //
+    // `bodies[id] = self` cannot be used here: it would also rewrite state,
+    // contagion_expiry_u and dps_rate_u from this thread's stale local copy, clobbering
+    // the atomic writes neighbour threads make to those three fields during this same
+    // dispatch. That is what made fire and poison spread drop events at random.
+    //
+    // radius, mass, teleport_x, teleport_z, teleport_y and pad3 are omitted because
+    // physics only ever reads them, so this also moves less data than the struct store.
+    // -------------------------------------------------------------------------
+    bodies[id].position          = self.position;
+    bodies[id].velocity          = self.velocity;
+    bodies[id].height            = self.height;
+    bodies[id].vertical_velocity = self.vertical_velocity;
+    bodies[id].facing_angle      = self.facing_angle;
+    bodies[id].wander_angle      = self.wander_angle;
+    bodies[id].health            = self.health;
+    bodies[id].last_hit_time     = self.last_hit_time;
+    bodies[id].bomb_origin_x     = self.bomb_origin_x;
+    bodies[id].bomb_origin_y     = self.bomb_origin_y;
+    bodies[id].damaged_time      = self.damaged_time;
+    bodies[id].damage_accum      = self.damage_accum;
+    bodies[id].body_flags        = self.body_flags;
+    bodies[id].impulse_x         = self.impulse_x;
+    bodies[id].impulse_z         = self.impulse_z;
+    bodies[id].impulse_y         = self.impulse_y;
+    bodies[id].speed_ema         = self.speed_ema;
 }

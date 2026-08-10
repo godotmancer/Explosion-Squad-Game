@@ -52,7 +52,7 @@ struct Body {
     float damaged_time;
     uint  state;
     uint  damage_accum;
-    uint  contagion_timer_u;
+    uint  contagion_expiry_u; // absolute contagion expiry time × 256, raised by atomicMax only
     uint  dps_rate_u;
     uint  body_flags;
     float teleport_x;
@@ -227,7 +227,10 @@ void main() {
                 // --- Contagion ---
                 if (proj.contagion != 0u && proj.contagion_dur > 0.0) {
                     atomicOr(bodies[bi].state, proj.contagion);
-                    atomicMax(bodies[bi].contagion_timer_u, uint(proj.contagion_dur * CONT_TIME_SCALE));
+                    // Absolute expiry, not a duration — physics_compute compares it against
+                    // `time` instead of counting it down.
+                    atomicMax(bodies[bi].contagion_expiry_u,
+                              uint((time + proj.contagion_dur) * CONT_TIME_SCALE));
                     if (proj.dps > 0.0) {
                         atomicMax(bodies[bi].dps_rate_u, uint(proj.dps * DAMAGE_SCALE));
                     }

@@ -51,7 +51,7 @@ struct Body {
     uint  state;
     // projectile effect accumulators (written by projectile_compute, applied/cleared by physics_compute)
     uint  damage_accum;       // 16  flat damage × 256 (atomicAdd)
-    uint  contagion_timer_u;  // 17  active contagion timer × 256 (atomicMax)
+    uint  contagion_expiry_u; // 17  absolute contagion expiry time × 256 (atomicMax)
     uint  dps_rate_u;         // 18  contagion DPS × 256 (atomicMax)
     uint  body_flags;         // 19  BODY_FLAG_TELEPORT | BODY_FLAG_HIT_FRAME
     float teleport_x;         // 20
@@ -96,6 +96,12 @@ const uint  HASH_MAX_PER_CELL = 64u;
 const float HASH_CELL_SIZE    = 2.0;
 const float GROUND_EPSILON    = 0.01;
 
+// Debug: one extra uint allocated past the end of the bucket array, used as a running
+// count of bodies dropped by per-cell overflow. spatial_hash() masks with
+// (HASH_TABLE_SIZE - 1), so this index can never collide with a real bucket, and the
+// physics/projectile queries never read it. Sampled from C# behind DebugHashOverflow.
+const uint  HASH_OVERFLOW_SLOT = HASH_TABLE_SIZE;
+
 uint spatial_hash(int cx, int cz) {
     uint hx = uint(cx) * 2654435761u;
     uint hz = uint(cz) * 2246822519u;
@@ -136,7 +142,12 @@ void main() {
     uint slot = atomicAdd(hash_counts[bucket], 1u) & 0x7FFFFFFFu;
     if (slot < HASH_MAX_PER_CELL) {
         hash_entries[bucket * HASH_MAX_PER_CELL + slot] = id;
+    } else {
+        // Overflow is still a graceful no-op — the body is simply invisible as a
+        // neighbour this frame — but it is no longer silent. The symptom (hogs walking
+        // through each other in a dense pile) is otherwise very hard to attribute, so
+        // count the drops and let C# surface them. Raise HASH_MAX_PER_CELL, or shrink
+        // HASH_CELL_SIZE, if this reads non-zero at your body count.
+        atomicAdd(hash_counts[HASH_OVERFLOW_SLOT], 1u);
     }
-    // Overflow is a graceful no-op: the body is simply invisible as a neighbour
-    // this frame.  Increase HASH_MAX_PER_CELL if this happens at your body count.
 }

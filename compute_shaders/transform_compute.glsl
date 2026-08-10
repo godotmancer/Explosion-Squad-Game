@@ -19,7 +19,7 @@ struct Body {
     float damaged_time;
     uint  state;
     uint  damage_accum;
-    uint  contagion_timer_u;
+    uint  contagion_expiry_u; // absolute contagion expiry time × 256
     uint  dps_rate_u;
     uint  body_flags;
     float teleport_x;
@@ -85,9 +85,10 @@ void main() {
     data[offset + 11] = b.position.y;   // origin.z
 
     // --- Instance color — contagion visual feedback ---
-    float cont_timer = float(b.contagion_timer_u) / 256.0;
+    // contagion_expiry_u is an absolute timestamp in 1/256 s units, so "infected" is
+    // simply expiry > now, compared in fixed point.
     float cr = 1.0, cg = 1.0, cb = 1.0;
-    if (cont_timer > 0.0) {
+    if (b.contagion_expiry_u > uint(time * 256.0)) {
         if ((b.state & STATE_ON_FIRE) != 0u) {
             float pulse = 0.8 + 0.2 * sin(time * 10.0 + float(id) * 0.7);
             cr = pulse; cg = 0.25; cb = 0.0;

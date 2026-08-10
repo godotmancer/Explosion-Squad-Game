@@ -100,6 +100,16 @@ public sealed partial class SquadMultiMeshInstance3D : MultiMeshInstance3D
   [Export]
   public int MaxVisibleLabels { get; set; } = 50;
 
+  /// <summary>
+  /// Samples the spatial-hash overflow counter once a second and logs any new drops.
+  /// A non-zero reading means bodies were invisible to their neighbours that frame, which
+  /// shows up as hogs walking through each other in dense piles rather than as an error.
+  /// Off by default: the sample costs a small buffer readback, which stalls the GPU.
+  /// </summary>
+  [ExportGroup("Debug")]
+  [Export]
+  public bool DebugHashOverflow { get; set; }
+
   // Hog behaviour states — matches state logic in hoglabels.gd
   public enum HogBehaviourState : byte
   {
@@ -188,6 +198,11 @@ public sealed partial class SquadMultiMeshInstance3D : MultiMeshInstance3D
   public const int HASH_TABLE_SIZE = 32768;
   public const int HASH_MAX_PER_CELL = 64;
 
+  // The counts buffer carries one uint per bucket plus a trailing overflow counter at
+  // index HASH_TABLE_SIZE (HASH_OVERFLOW_SLOT in spatial_hash_build.glsl).
+  public const int HASH_OVERFLOW_SLOT = HASH_TABLE_SIZE;
+  public const uint HASH_COUNTS_BUFFER_SIZE = (HASH_TABLE_SIZE + 1) * sizeof(uint);
+
   // HASH_CELL_SIZE is declared in the shaders only; no C# behaviour depends on the value.
 
   private RenderingDevice _rd;
@@ -273,7 +288,9 @@ public sealed partial class SquadMultiMeshInstance3D : MultiMeshInstance3D
     public float DamagedTime;
     public uint State;
     public uint DamageAccum;
-    public uint ContagionTimerU;
+    // Absolute time (x256) at which the contagion lapses, not a remaining duration.
+    // Raised by atomicMax in projectile_compute / physics_compute and never decremented.
+    public uint ContagionExpiryU;
     public uint DpsRateU;
     public uint BodyFlags;
     public float TeleportX;
@@ -698,6 +715,11 @@ public sealed partial class SquadMultiMeshInstance3D : MultiMeshInstance3D
 
     // Toggle parity after GPU work is complete.
     _hashFrameParity ^= 1u;
+
+    if (DebugHashOverflow)
+    {
+      SampleHashOverflow(delta);
+    }
 
     // --- Readback: BufferGetData allocates the returned array (Godot API limitation),
     // but everything downstream reads it in place via Span<float> — no further copies. ---

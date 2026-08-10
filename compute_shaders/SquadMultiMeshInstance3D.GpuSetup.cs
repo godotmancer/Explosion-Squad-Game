@@ -85,10 +85,11 @@ public sealed partial class SquadMultiMeshInstance3D
 
     // --- Spatial hash buffers (fixed size, independent of NumBodies) ---
     _hashPushBytes = new byte[HASH_BUILD_PUSH_SIZE];
-    // counts: one uint per bucket — cleared to 0 on creation
+    // counts: one uint per bucket, plus one trailing uint used as the overflow counter
+    // (HASH_OVERFLOW_SLOT in spatial_hash_build.glsl) — all cleared to 0 on creation
     _hashCountsBuffer = _rd.StorageBufferCreate(
-      HASH_TABLE_SIZE * sizeof(uint),
-      new byte[HASH_TABLE_SIZE * sizeof(uint)]
+      HASH_COUNTS_BUFFER_SIZE,
+      new byte[HASH_COUNTS_BUFFER_SIZE]
     );
     // entries: HASH_MAX_PER_CELL body indices per bucket
     _hashEntriesBuffer = _rd.StorageBufferCreate(
@@ -137,6 +138,46 @@ public sealed partial class SquadMultiMeshInstance3D
     }
 
     RebuildProjectileUniformSet();
+  }
+
+  private double _timeSinceOverflowSample;
+  private uint _lastHashOverflowCount;
+
+  /// <summary>
+  /// Reads the trailing 4-byte overflow counter out of the hash counts buffer and logs any
+  /// increase since the last sample. Sampled at 1 Hz rather than per frame because
+  /// BufferGetData forces a submit-and-wait on the local RenderingDevice.
+  /// </summary>
+  private void SampleHashOverflow(double delta)
+  {
+    _timeSinceOverflowSample += delta;
+    if (_timeSinceOverflowSample < 1.0)
+    {
+      return;
+    }
+
+    _timeSinceOverflowSample = 0;
+
+    var raw = _rd.BufferGetData(_hashCountsBuffer, HASH_OVERFLOW_SLOT * sizeof(uint), sizeof(uint));
+    if (raw is not { Length: sizeof(uint) })
+    {
+      return;
+    }
+
+    // The shader only ever increments this, so the difference is the drops since the last
+    // sample. Unsigned subtraction gives the right answer even across a 2^32 wrap.
+    var total = BitConverter.ToUInt32(raw, 0);
+    var dropped = total - _lastHashOverflowCount;
+    _lastHashOverflowCount = total;
+
+    if (dropped > 0)
+    {
+      GD.PushWarning(
+        $"Spatial hash dropped {dropped} body insertions in the last second: a cell held "
+          + $"more than HASH_MAX_PER_CELL ({HASH_MAX_PER_CELL}) bodies. Those bodies were "
+          + "invisible to neighbour queries. Raise HASH_MAX_PER_CELL or shrink HASH_CELL_SIZE."
+      );
+    }
   }
 
   protected override void Dispose(bool disposing)
