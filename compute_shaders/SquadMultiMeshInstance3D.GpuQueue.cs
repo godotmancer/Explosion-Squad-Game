@@ -207,7 +207,6 @@ public sealed partial class SquadMultiMeshInstance3D
     // Uniform sets point at the buffers being replaced, so retire them first. The previous
     // code assigned `new Rid()` over these without freeing, leaking four sets per growth.
     FreeGpuRid(ref _physicsUniformSet);
-    FreeGpuRid(ref _transformUniformSet);
     FreeGpuRid(ref _hashUniformSet);
     FreeGpuRid(ref _projUniformSet);
 
@@ -236,7 +235,6 @@ public sealed partial class SquadMultiMeshInstance3D
     Multimesh.InstanceCount = newCapacity;
 
     RebuildPhysicsUniformSet();
-    RebuildTransformUniformSet();
     RebuildHashUniformSet();
     RebuildProjectileUniformSet();
   }

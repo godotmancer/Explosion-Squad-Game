@@ -14,7 +14,6 @@ public sealed partial class SquadMultiMeshInstance3D
 
     // --- Pre-allocate staging buffers (reused every frame, zero GC pressure) ---
     _physicsPushBytes = new byte[PHYSICS_PUSH_SIZE];
-    _transformPushBytes = new byte[TRANSFORM_PUSH_SIZE];
     _bombStaging = new float[MAX_BOMBS * BOMB_STRIDE];
     _bombBytes = new byte[MAX_BOMBS * BOMB_STRIDE * sizeof(float)];
 
@@ -104,22 +103,15 @@ public sealed partial class SquadMultiMeshInstance3D
     VerifyPipeline(_hashPipeline, "spatial_hash_build.glsl");
     RebuildHashUniformSet();
 
-    _physicsPipeline = _rd.ComputePipelineCreate(_physicsShader);
-    VerifyPipeline(_physicsPipeline, "physics_compute.glsl");
-    RebuildPhysicsUniformSet(); // includes bindings 0-4 (bodies, obstacles, bombs, hash counts, hash entries)
-
-    // --- Transform shader ---
-    var transformFile = GD.Load<RDShaderFile>("res://compute_shaders/transform_compute.glsl");
-    var transformSpirv = transformFile.GetSpirV();
-    _transformShader = _rd.ShaderCreateFromSpirV(transformSpirv);
-
+    // --- MultiMesh instance buffer — written by physics_compute's tail, so it must exist
+    // before the physics uniform set is built (it is binding 5). ---
     _transformFloats = new float[NumBodies * INSTANCE_STRIDE];
     var transformSize = (uint)(_transformFloats.Length * sizeof(float));
     _transformBuffer = _rd.StorageBufferCreate(transformSize);
 
-    RebuildTransformUniformSet();
-    _transformPipeline = _rd.ComputePipelineCreate(_transformShader);
-    VerifyPipeline(_transformPipeline, "transform_compute.glsl");
+    _physicsPipeline = _rd.ComputePipelineCreate(_physicsShader);
+    VerifyPipeline(_physicsPipeline, "physics_compute.glsl");
+    RebuildPhysicsUniformSet(); // bindings 0-5: bodies, obstacles, bombs, hash counts, hash entries, instances
 
     // --- Projectile shader + buffer ---
     var projFile = GD.Load<RDShaderFile>("res://compute_shaders/projectile_compute.glsl");
@@ -215,11 +207,9 @@ public sealed partial class SquadMultiMeshInstance3D
       Rid[] rids =
       [
         _physicsPipeline,
-        _transformPipeline,
         _hashPipeline,
         _projPipeline,
         _physicsUniformSet,
-        _transformUniformSet,
         _hashUniformSet,
         _projUniformSet,
         _physicsBuffer,
@@ -230,7 +220,6 @@ public sealed partial class SquadMultiMeshInstance3D
         _hashEntriesBuffer,
         _projBuffer,
         _physicsShader,
-        _transformShader,
         _hashShader,
         _projShader,
       ];
@@ -284,13 +273,6 @@ public sealed partial class SquadMultiMeshInstance3D
     floats[PHYS_PUSH_HOG_GRAVITY_SCALE] = HogGravityScale;
   }
 
-  private void WriteTransformPush(int numBodies, float time)
-  {
-    var floats = MemoryMarshal.Cast<byte, float>(_transformPushBytes.AsSpan());
-    var ints = MemoryMarshal.Cast<byte, int>(_transformPushBytes.AsSpan());
-    ints[XFORM_PUSH_NUM_BODIES] = numBodies;
-    floats[XFORM_PUSH_TIME] = time;
-  }
 
   private void WriteHashBuildPush(int numBodies, float yOffset)
   {
@@ -303,33 +285,6 @@ public sealed partial class SquadMultiMeshInstance3D
     floats[3] = 0f; // pad
   }
 
-  private void RebuildTransformUniformSet()
-  {
-    if (_transformUniformSet.IsValid)
-    {
-      _rd.FreeRid(_transformUniformSet);
-    }
-
-    var tUniformBody = new RDUniform
-    {
-      UniformType = RenderingDevice.UniformType.StorageBuffer,
-      Binding = 0,
-    };
-    tUniformBody.AddId(_physicsBuffer);
-
-    var tUniformTransforms = new RDUniform
-    {
-      UniformType = RenderingDevice.UniformType.StorageBuffer,
-      Binding = 1,
-    };
-    tUniformTransforms.AddId(_transformBuffer);
-
-    _transformUniformSet = _rd.UniformSetCreate(
-      [tUniformBody, tUniformTransforms],
-      _transformShader,
-      0
-    );
-  }
 
   private void RebuildPhysicsUniformSet()
   {
@@ -356,7 +311,15 @@ public sealed partial class SquadMultiMeshInstance3D
       Binding = 4,
     };
     heu.AddId(_hashEntriesBuffer);
-    _physicsUniformSet = _rd.UniformSetCreate([pu, ou, bu, hcu, heu], _physicsShader, 0);
+    // Binding 5: MultiMesh instance data, written at the tail of physics_compute. This used to
+    // be a separate transform_compute dispatch.
+    var tu = new RDUniform
+    {
+      UniformType = RenderingDevice.UniformType.StorageBuffer,
+      Binding = 5,
+    };
+    tu.AddId(_transformBuffer);
+    _physicsUniformSet = _rd.UniformSetCreate([pu, ou, bu, hcu, heu, tu], _physicsShader, 0);
   }
 
   private void RebuildHashUniformSet()

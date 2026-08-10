@@ -77,6 +77,12 @@ layout(set = 0, binding = 2, std430) restrict readonly buffer BombsBuffer     { 
 // Spatial hash table written by spatial_hash_build.glsl each frame before this shader runs.
 layout(set = 0, binding = 3, std430) restrict readonly buffer HashCountsBuffer  { uint hash_counts[];  };
 layout(set = 0, binding = 4, std430) restrict readonly buffer HashEntriesBuffer { uint hash_entries[]; };
+// MultiMesh instance data, written at the tail of main(). This used to be a separate
+// transform_compute dispatch, which re-read all 112 bytes of every Body that this shader
+// already had in registers. Declared as vec4 so the 20 floats per instance go out as five
+// coalesced 16-byte stores instead of 20 scalar ones (20 floats == 80 bytes == 5 * vec4,
+// so every instance stays 16-byte aligned).
+layout(set = 0, binding = 5, std430) restrict writeonly buffer InstanceBuffer { vec4 instances[]; };
 
 layout(push_constant, std430) uniform Params {
     float delta_time;
@@ -274,6 +280,19 @@ const float DAMAGE_SCALE    = 256.0;
 const float CONT_TIME_SCALE = 256.0;
 const float IMPULSE_SCALE   = 1000.0;
 
+// =============================================================================
+// MULTIMESH INSTANCE LAYOUT  (written at the tail of main)
+// =============================================================================
+// 20 floats per instance: 12 transform + 4 color + 4 custom, addressed as 5 vec4 rows.
+const uint INSTANCE_VEC4S = 5u;
+const uint INST_ROW_CUSTOM = 4u; // (speed, health, state bits, time)
+
+// Seconds of remaining contagion over which the tint eases back to white. Because a spread
+// hop only inherits a fraction of its infector's remaining time, hops far from the origin
+// start out already inside this window and so render faint — the outbreak visibly weakens
+// as it travels instead of every infected hog looking equally lit.
+const float CONTAGION_FADE_TIME = 1.5;
+
 
 // =============================================================================
 // UTILITY FUNCTIONS
@@ -426,8 +445,18 @@ void main() {
         return;
 
     Body self = bodies[id];
-    if (self.health <= 0.0)
+    if (self.health <= 0.0) {
+        // Already a corpse — skip the simulation, but keep the instance's state row marked
+        // dead. This shader now owns the instance buffer, and the CPU compaction pass decides
+        // what to draw from that state slot alone. Without this write a freshly grown (and
+        // therefore uninitialised) instance buffer would hand the CPU garbage that does not
+        // read as STATE_DEAD, and corpses would be drawn as live hogs. Only this row needs
+        // refreshing: the position rows were written on the frame the hog died, which is the
+        // one frame the CPU reads them for the death event.
+        instances[(id * INSTANCE_VEC4S) + INST_ROW_CUSTOM] =
+            vec4(0.0, 0.0, uintBitsToFloat(STATE_DEAD), time);
         return;
+    }
 
     // Seed the wander angle on first use (avoids every body starting in sync)
     if (self.wander_angle == 0.0) {
@@ -1055,7 +1084,11 @@ void main() {
     // expiry instead, and retiring a lapsed contagion's bits is the first infector's job
     // (see try_spread_contagion above and projectile_compute).
     atomicAnd(bodies[id].state, CONTAGION_MASK);
-    atomicOr (bodies[id].state, st);
+    // atomicOr returns the pre-OR value, which is the contagion bits that survived the
+    // atomicAnd — including any a neighbour set during this dispatch. So this costs nothing
+    // extra and gives the exact post-write state the old separate transform pass used to read
+    // back after its barrier.
+    uint final_state = atomicOr(bodies[id].state, st) | st;
 
     // -------------------------------------------------------------------------
     // Field-by-field writeback.
@@ -1085,4 +1118,46 @@ void main() {
     bodies[id].impulse_z         = self.impulse_z;
     bodies[id].impulse_y         = self.impulse_y;
     bodies[id].speed_ema         = self.speed_ema;
+
+    // =========================================================================
+    // MULTIMESH INSTANCE DATA
+    // =========================================================================
+    // Formerly a separate transform_compute dispatch. Everything below comes from registers
+    // this shader already holds, so merging removed a dispatch, a barrier, and a re-read of
+    // all 112 bytes of every Body. `speed` was computed in the facing-angle section above and
+    // is still current: the gravity block only touches vertical_velocity and height.
+
+    // Y-axis rotation
+    float cf = cos(self.facing_angle);
+    float sf = sin(self.facing_angle);
+
+    // --- Contagion tint, eased out over the contagion's final seconds ---
+    // Uses self.contagion_expiry_u as read at the top of main. A hog infected by a NEIGHBOUR
+    // during this same dispatch therefore tints one frame later than it used to, when the
+    // transform pass read the buffer back after a barrier. Projectile hits are unaffected —
+    // those land in the previous dispatch. One frame at 60 Hz is not observable, and avoiding
+    // an extra coherent read of the expiry per body is the whole point of the merge.
+    vec3 tint = vec3(1.0);
+    if (self.contagion_expiry_u > now_u) {
+        vec3 contagion_tint = vec3(1.0);
+        if ((final_state & STATE_ON_FIRE) != 0u) {
+            float pulse = 0.8 + 0.2 * sin(time * 10.0 + float(id) * 0.7);
+            contagion_tint = vec3(pulse, 0.25, 0.0);
+        } else if ((final_state & STATE_POISONED) != 0u) {
+            contagion_tint = vec3(0.15, 0.9, 0.1);
+        } else if ((final_state & STATE_DRUNK) != 0u) {
+            float pulse = 0.7 + 0.3 * sin(time * 4.0 + float(id) * 1.3);
+            contagion_tint = vec3(0.6 * pulse, 0.05, 0.9);
+        }
+        float remaining = float(self.contagion_expiry_u - now_u) / CONT_TIME_SCALE;
+        tint = mix(vec3(1.0), contagion_tint, clamp(remaining / CONTAGION_FADE_TIME, 0.0, 1.0));
+    }
+
+    // Godot MultiMesh row-major layout: rows 0-2 are [basis column | origin component].
+    uint o = id * INSTANCE_VEC4S;
+    instances[o + 0u] = vec4( cf, 0.0,  sf, self.position.x);
+    instances[o + 1u] = vec4(0.0, 1.0, 0.0, self.height);
+    instances[o + 2u] = vec4(-sf, 0.0,  cf, self.position.y);
+    instances[o + 3u] = vec4(tint, 1.0);
+    instances[o + 4u] = vec4(speed, self.health, uintBitsToFloat(final_state), time);
 }

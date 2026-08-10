@@ -211,11 +211,8 @@ public sealed partial class SquadMultiMeshInstance3D : MultiMeshInstance3D
   private Rid _bombBuffer;
   private Rid _transformBuffer;
   private Rid _physicsShader;
-  private Rid _transformShader;
   private Rid _physicsPipeline;
-  private Rid _transformPipeline;
   private Rid _physicsUniformSet;
-  private Rid _transformUniformSet;
 
   // Spatial hash build pipeline — runs two sub-passes per frame before physics.
   private Rid _hashShader;
@@ -346,7 +343,7 @@ public sealed partial class SquadMultiMeshInstance3D : MultiMeshInstance3D
 
   public const int INST_COLOR_A = 15;
 
-  // INSTANCE_CUSTOM written by transform_compute.glsl
+  // INSTANCE_CUSTOM written by physics_compute.glsl (instance tail)
   public const int INST_CUSTOM_R = 16;
   public const int INST_HEALTH = 17; // INSTANCE_CUSTOM.g = health
   public const int INST_STATE = 18; // INSTANCE_CUSTOM.b = bitwise state flags (reinterpret as uint)
@@ -442,13 +439,6 @@ public sealed partial class SquadMultiMeshInstance3D : MultiMeshInstance3D
   public const int PHYS_PUSH_FRAME_PARITY = 12; // uint  frame_parity (0 or 1)
   public const int PHYS_PUSH_HOG_GRAVITY_SCALE = 13; // float hog_gravity_scale
 
-  // Transform push-constant slots  (TRANSFORM_PUSH_SIZE = 4 × sizeof(float))
-  public const int XFORM_PUSH_NUM_BODIES = 0; // int   num_bodies
-
-  // [1] padding
-  public const int XFORM_PUSH_TIME = 2; // float time
-
-  // [3] padding
 
   private int _numObstacles;
   private uint _obstacleBufferSize;
@@ -504,10 +494,8 @@ public sealed partial class SquadMultiMeshInstance3D : MultiMeshInstance3D
 
   // --- Pre-allocated staging buffers (zero per-frame heap allocations) ---
   public const int PHYSICS_PUSH_SIZE = 14 * sizeof(float); // 14 push constants
-  public const int TRANSFORM_PUSH_SIZE = 4 * sizeof(float); // num_bodies, _pad, time, _pad
 
   private byte[] _physicsPushBytes;
-  private byte[] _transformPushBytes;
   private float[] _bombStaging; // MAX_BOMBS * BOMB_STRIDE, reused every frame
   private byte[] _bombBytes; // byte view of bomb staging, reused every frame
   private float[] _obstacleStaging; // pre-allocated with capacity, grown if needed
@@ -667,7 +655,6 @@ public sealed partial class SquadMultiMeshInstance3D : MultiMeshInstance3D
       _activeBombs.Count,
       BombFearDuration
     );
-    WriteTransformPush(NumBodies, _time);
     var workGroups = (uint)Mathf.CeilToInt((float)NumBodies / GPU_THREAD_GROUP_SIZE);
 
     // -------------------------------------------------------------------------
@@ -718,11 +705,6 @@ public sealed partial class SquadMultiMeshInstance3D : MultiMeshInstance3D
     _rd.ComputeListDispatch(cl, workGroups, 1, 1);
     _rd.ComputeListAddBarrier(cl); // physics writes bodies[] → transform reads bodies[]
 
-    // --- Transform ---
-    _rd.ComputeListBindComputePipeline(cl, _transformPipeline);
-    _rd.ComputeListBindUniformSet(cl, _transformUniformSet, 0);
-    _rd.ComputeListSetPushConstant(cl, _transformPushBytes, TRANSFORM_PUSH_SIZE);
-    _rd.ComputeListDispatch(cl, workGroups, 1, 1);
 
     _rd.ComputeListEnd();
     _rd.Submit();
