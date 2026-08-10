@@ -13,10 +13,12 @@ config_version=5
 config/name="ExplosionSquadGame"
 run/main_scene="uid://c0m784riw25wo"
 config/features=PackedStringArray("4.8", "C#", "Forward Plus")
+run/flush_stdout_on_print=true
+run/load_shell_environment=true
 boot_splash/bg_color=Color(0.01907944, 0.31334987, 0.38034695, 1)
 boot_splash/image="uid://cb0g3nsaa2vac"
 config/icon="res://icon.svg"
-boot_splash/minimum_display_time=2000
+boot_splash/minimum_display_time=1000
 
 [autoload]
 
@@ -25,11 +27,13 @@ Global="*uid://c4sihd8rawspw"
 [debug]
 
 settings/stdout/print_fps=true
+settings/stdout/print_gpu_profile=true
 
 [display]
 
 window/size/viewport_width=780
 window/size/viewport_height=1080
+window/size/initial_position_type=4
 window/hdr/request_hdr_output=true
 window/dpi/allow_hidpi=false
 window/vsync/vsync_mode=0
@@ -259,7 +263,5 @@ virtual_controller/ios/enable_button_y=true
 [rendering]
 
 shader_compiler/shader_cache/strip_debug=true
-shading/overrides/force_lambert_over_burley=true
 viewport/hdr_2d=true
-anti_aliasing/quality/msaa_3d=1
 environment/defaults/default_clear_color=Color(0, 0, 0, 1)

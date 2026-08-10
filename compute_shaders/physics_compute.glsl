@@ -553,8 +553,15 @@ void main() {
         int self_cx = int(floor(self.position.x / HASH_CELL_SIZE));
         int self_cz = int(floor(self.position.y / HASH_CELL_SIZE));
 
-        // The outer 5×5 ring exists solely for fear contagion — skip it when disabled.
-        int ring = bomb_fear_duration > 0.0 ? 2 : 1;
+        // The outer 5×5 ring exists solely for fear contagion, so scan it only when
+        // fear can actually change this frame: a live bomb is in the buffer, or this
+        // body is still inside its own fear window. Otherwise 3×3 is enough and the
+        // bucket count per body drops from 25 to 9.
+        //
+        // Gate on fear_factor, not last_hit_time: last_hit_time is never reset, so
+        // once a body has been hit even a single time it would scan the wide ring
+        // forever and the saving would decay away as the crowd takes damage.
+        int ring = (bomb_fear_duration > 0.0 && (num_bombs > 0 || fear_factor > 0.0)) ? 2 : 1;
 
         for (int dcx = -ring; dcx <= ring; dcx++) {
             for (int dcz = -ring; dcz <= ring; dcz++) {
@@ -573,19 +580,29 @@ void main() {
                     int i = int(hash_entries[bucket * HASH_MAX_PER_CELL + k]);
                     if (i == int(id)) continue;
 
+                    // Load every neighbour field this iteration needs exactly once.
+                    // BodiesBuffer is `coherent` and this loop writes it through
+                    // try_spread_contagion, so each re-index of bodies[i] is an
+                    // uncached memory round trip the driver is not free to fold away.
+                    float n_health = bodies[i].health;
+                    float n_height = bodies[i].height;
+
                     // Re-check aliveness here: a body could have died between
                     // the hash build pass and this pass (same frame, same Sync).
-                    if (bodies[i].health <= 0.0 || bodies[i].height > y_offset + GROUND_EPSILON) continue;
+                    if (n_health <= 0.0 || n_height > y_offset + GROUND_EPSILON) continue;
 
-                    vec2  diff = self.position - bodies[i].position;
+                    vec2  n_position = bodies[i].position;
+                    vec2  diff = self.position - n_position;
                     float dist = length(diff);
                     if (dist < NEAR_ZERO) continue;
 
                     // ---- Fear contagion: both inner and outer rings (up to 20u) ----
-                    if (dist < FEAR_CONTAGION_RADIUS && bomb_fear_duration > 0.0 && bodies[i].last_hit_time > 0.0) {
-                        float n_time = time - bodies[i].last_hit_time;
+                    if (dist < FEAR_CONTAGION_RADIUS && bomb_fear_duration > 0.0) {
+                        float n_last_hit = bodies[i].last_hit_time;
+                        float n_time     = time - n_last_hit;
                         // Only spread from neighbors still actively afraid (within early window)
-                        if (n_time >= 0.0 && n_time < bomb_fear_duration * FEAR_CONTAGION_WINDOW) {
+                        if (n_last_hit > 0.0 && n_time >= 0.0
+                            && n_time < bomb_fear_duration * FEAR_CONTAGION_WINDOW) {
                             float n_fear = 1.0 - (n_time / bomb_fear_duration);
                             if (n_fear > best_contagion_fear) {
                                 best_contagion_fear   = n_fear;
@@ -616,7 +633,7 @@ void main() {
 
                         // ---- Cohesion: steer toward local crowd center ----
                         if (dist < COHESION_RADIUS) {
-                            avg_position += bodies[i].position;
+                            avg_position += n_position;
                             cohesion_count++;
                         }
 

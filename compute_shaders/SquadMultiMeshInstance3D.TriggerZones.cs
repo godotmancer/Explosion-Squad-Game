@@ -90,12 +90,14 @@ public sealed partial class SquadMultiMeshInstance3D
           gpuFloats[src + INST_ORIGIN_Z]
         );
 
+        var emitSignal = false;
+
         switch (zone.Effect)
         {
           case TriggerEffect.Damage:
             // Damage re-fires on every re-entry; no permanent immunity needed.
             DamageHogViaBuffer(i, zone.Value);
-            EmitSignal(SignalName.HogZoneTriggered, i, hogPos, zone.Shape, (int)zone.Effect);
+            emitSignal = true;
             break;
 
           case TriggerEffect.Multiply:
@@ -112,7 +114,7 @@ public sealed partial class SquadMultiMeshInstance3D
               _pendingTriggerSpawns.Add((zoneIdx, hogPos, cloneCount));
             }
 
-            EmitSignal(SignalName.HogZoneTriggered, i, hogPos, zone.Shape, (int)zone.Effect);
+            emitSignal = true;
             break;
 
           case TriggerEffect.Add:
@@ -130,11 +132,15 @@ public sealed partial class SquadMultiMeshInstance3D
                 (zoneIdx, zone.Shape.GlobalPosition with { Y = YOffset }, addCount)
               );
             }
-
-            EmitSignal(SignalName.HogZoneTriggered, i, hogPos, zone.Shape, (int)zone.Effect);
+            emitSignal = true;
             break;
           default:
             break;
+        }
+
+        if (ShowHogs && emitSignal)
+        {
+          EmitSignal(SignalName.HogZoneTriggered, i, hogPos, zone.Shape, (int)zone.Effect);
         }
       }
 
