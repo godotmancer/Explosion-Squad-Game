@@ -827,6 +827,19 @@ void main() {
     // ---- Obstacle avoidance (soft steering) ----
     vec2 steer_obstacle = vec2(0.0);
     for (int oi = 0; oi < num_obstacles; oi++) {
+        // Broad phase — reject on centre distance before running the surface math.
+        //
+        // padded.x + padded.y is an upper bound on the distance from the obstacle centre to
+        // any point on its padded surface, since sqrt(x*x + y*y) <= x + y for non-negative
+        // x, y. So dist_surface >= dist_centre - (padded.x + padded.y), and anything failing
+        // the test below could not possibly have satisfied dist_surface < DETECT_RADIUS.
+        // The reject is therefore conservative by construction: it changes which obstacles
+        // are *evaluated*, never which ones have an effect.
+        vec2  to_obs = self.position - obstacles[oi].center;
+        vec2  padded = obstacles[oi].half_extents + vec2(obstacles[oi].margin + self.radius);
+        float reach  = padded.x + padded.y + OBSTACLE_DETECT_RADIUS;
+        if (dot(to_obs, to_obs) > reach * reach) continue;
+
         float dist_surface;
         vec2  normal;
         get_obstacle_surface(obstacles[oi], self.position, self.radius, dist_surface, normal);
@@ -944,6 +957,21 @@ void main() {
         for (int iter = 0; iter < PBD_ITERATIONS; iter++) {
             for (int oi = 0; oi < num_obstacles; oi++) {
                 Obstacle obs = obstacles[oi];
+
+                // Broad phase — same centre-distance bound as the soft-steering loop, but the
+                // contact radius here can grow with surface speed, so the bound has to allow
+                // for it. |surf_vel| <= |linear| + |angular| * |offset from centre|, which is
+                // an upper bound on the speed_clearance computed below, so this stays
+                // conservative for moving and rotating obstacles too.
+                vec2  to_obs = self.position - obs.center;
+                float dist_centre = length(to_obs);
+                vec2  padded = obs.half_extents + vec2(obs.margin + self.radius);
+                float max_surf_speed = length(obs.velocity) + (abs(obs.angular_vel) * dist_centre);
+                float max_clearance  = max_surf_speed * delta_time * PBD_VEL_LOOKAHEAD;
+                if (dist_centre > padded.x + padded.y + max(self.radius, max_clearance)) {
+                    continue;
+                }
+
                 float dist_surface;
                 vec2  normal;
                 get_obstacle_surface(obs, self.position, self.radius, dist_surface, normal);
