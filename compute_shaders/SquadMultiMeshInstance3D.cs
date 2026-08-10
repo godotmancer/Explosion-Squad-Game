@@ -658,18 +658,19 @@ public sealed partial class SquadMultiMeshInstance3D : MultiMeshInstance3D
     var workGroups = (uint)Mathf.CeilToInt((float)NumBodies / GPU_THREAD_GROUP_SIZE);
 
     // -------------------------------------------------------------------------
-    // Spatial hash build + physics — chained in one command list.
+    // Hash build → projectile → physics, chained in one command list with a
+    // single Submit+Sync per frame.  Physics writes the instance buffer from its
+    // own tail, so there is no separate transform pass and no second sync point.
     //
     // The build shader uses a 1-bit frame parity tag (bit 31 of hash_counts[])
     // to lazily reset stale buckets, eliminating the need for a separate clear
-    // pass.  This keeps the total sync-point count at 2 (same as before spatial
-    // hashing was added): one after hash+physics, one after transform.
+    // pass.
     //
-    // ComputeListAddBarrier ensures the hash writes are visible to the physics
-    // dispatch.  The parity check in the physics shader is an additional safety
-    // net: if the barrier is imperfect (known Metal edge case for storage-buffer
-    // writes), physics silently treats those stale buckets as empty rather than
-    // reading garbage body indices.
+    // ComputeListAddBarrier ensures each dispatch's writes are visible to the
+    // next one that reads them.  The parity check in the physics shader is an
+    // additional safety net: if the barrier is imperfect (known Metal edge case
+    // for storage-buffer writes), physics silently treats those stale buckets as
+    // empty rather than reading garbage body indices.
     // -------------------------------------------------------------------------
     WriteHashBuildPush(NumBodies, YOffset);
     WriteProjectilePush(fdelta, _time);
@@ -703,9 +704,10 @@ public sealed partial class SquadMultiMeshInstance3D : MultiMeshInstance3D
     _rd.ComputeListBindUniformSet(cl, _physicsUniformSet, 0);
     _rd.ComputeListSetPushConstant(cl, _physicsPushBytes, PHYSICS_PUSH_SIZE);
     _rd.ComputeListDispatch(cl, workGroups, 1, 1);
-    _rd.ComputeListAddBarrier(cl); // physics writes bodies[] → transform reads bodies[]
 
-
+    // No trailing barrier: physics is the last pass in the list, so there is no
+    // subsequent dispatch to make its writes visible to. The CPU readback below is
+    // ordered by Submit()+Sync() and BufferGetData's own transfer synchronisation.
     _rd.ComputeListEnd();
     _rd.Submit();
     _rd.Sync();
