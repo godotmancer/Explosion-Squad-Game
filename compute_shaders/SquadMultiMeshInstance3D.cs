@@ -517,6 +517,18 @@ public sealed partial class SquadMultiMeshInstance3D : MultiMeshInstance3D
   // Must match local_size_x in both compute shaders
   private const int GPU_THREAD_GROUP_SIZE = 64;
 
+  // Body-buffer capacity growth. Deliberately tighter than the usual doubling because the
+  // MultiMesh upload is sized by CAPACITY, not by live hog count: Multimesh.InstanceCount
+  // tracks capacity (tying it to NumBodies instead would reallocate on every spawn), and
+  // MultimeshSetBuffer must be handed InstanceCount * INSTANCE_STRIDE floats. So every unused
+  // slot costs upload bandwidth every frame for the rest of the session. Doubling left up to
+  // 50% of the buffer as dead weight — measured 40000 capacity carrying ~20000 live hogs,
+  // i.e. 3.2 MB uploaded per frame to draw 1.6 MB of hogs. Growth events cost a few ms each
+  // and are one-off, so trading more of them for a permanently tighter buffer is the right
+  // way round. The absolute floor stops small capacities from growing by a rounding error.
+  private const float BODY_CAPACITY_GROWTH = 1.25f;
+  private const int BODY_CAPACITY_MIN_STEP = 256;
+
   [Signal]
   public delegate void HogDiedEventHandler(int index, Vector3 position, uint stateBits);
 
@@ -725,8 +737,14 @@ public sealed partial class SquadMultiMeshInstance3D : MultiMeshInstance3D
     }
 
     // --- Readback: BufferGetData allocates the returned array (Godot API limitation),
-    // but everything downstream reads it in place via Span<float> — no further copies. ---
-    var outputBytes = _rd.BufferGetData(_transformBuffer);
+    // but everything downstream reads it in place via Span<float> — no further copies.
+    //
+    // Only the live prefix is transferred. The buffer is sized to _bodyCapacity, but every
+    // consumer below (the compaction loop, UpdateLabels, ProcessTriggerZones) indexes by body
+    // id and stops at NumBodies, so the slack slots were being copied and allocated for
+    // nothing. ---
+    var readbackBytes = (uint)(NumBodies * INSTANCE_STRIDE * sizeof(float));
+    var outputBytes = _rd.BufferGetData(_transformBuffer, 0, readbackBytes);
     var gpuFloats = MemoryMarshal.Cast<byte, float>(outputBytes.AsSpan());
 
     if (_showStateLabels)
@@ -831,7 +849,13 @@ public sealed partial class SquadMultiMeshInstance3D : MultiMeshInstance3D
     // same frame sees the new capacity and does not queue a redundant growth.
     if (newCount > _bodyCapacity)
     {
-      var newCapacity = Math.Max(newCount, _bodyCapacity * 2);
+      var newCapacity = Math.Max(
+        newCount,
+        Math.Max(
+          _bodyCapacity + BODY_CAPACITY_MIN_STEP,
+          (int)(_bodyCapacity * BODY_CAPACITY_GROWTH)
+        )
+      );
       EnqueueGrowPhysics(newCapacity, (int)writeOffset);
       _bodyCapacity = newCapacity;
       Array.Resize(ref _hogStates, newCapacity);
