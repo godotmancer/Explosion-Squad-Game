@@ -2,10 +2,7 @@
 
 [ext_resource type="Script" uid="uid://dcrfnrjg4axqu" path="res://scripts/GateOpenCloseTimer.gd" id="1_pkeuy"]
 
-[node name="GateOpenCloseTimer" type="Timer" unique_id=616260880 node_paths=PackedStringArray("gate_animation")]
+[node name="GateOpenCloseTimer" type="Timer" unique_id=616260880]
 script = ExtResource("1_pkeuy")
-gate_animation = NodePath("")
 time_to_open = 5.0
 time_to_close = 25.0
-start_open = true
-latch = true

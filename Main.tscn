@@ -26,6 +26,7 @@
 [ext_resource type="Script" uid="uid://dtvgc1teu0g65" path="res://ui/Fps.gd" id="24_f4ese"]
 [ext_resource type="Script" uid="uid://cttx42f7m5521" path="res://ui/HogsKilled.gd" id="25_mxvw5"]
 [ext_resource type="Script" uid="uid://bu2x3bqluh7yx" path="res://ui/TotalHogs.gd" id="26_xrxkg"]
+[ext_resource type="Shader" uid="uid://c443amxnokpmq" path="res://shaders/hog_contagion.gdshader" id="27_tint0"]
 
 [sub_resource type="Gradient" id="Gradient_a0gqe"]
 interpolation_mode = 2
@@ -227,9 +228,10 @@ albedo_color = Color(1.1461712, 0.21721677, 1.1461712, 1)
 material = SubResource("StandardMaterial3D_a0gqe")
 size = Vector3(0.25, 2.09, 0.25)
 
-[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_hhcpw"]
-vertex_color_use_as_albedo = true
-albedo_color = Color(0.89081144, 0.5641828, 0.24339655, 1)
+[sub_resource type="ShaderMaterial" id="ShaderMaterial_hhcpw"]
+shader = ExtResource("27_tint0")
+shader_parameter/albedo = Color(0.89081144, 0.5641828, 0.24339655, 1)
+shader_parameter/glow_energy = 1.0
 
 [sub_resource type="BoxMesh" id="BoxMesh_5uiug"]
 size = Vector3(0.75, 0.5, 0.75)
@@ -699,7 +701,7 @@ _editor_transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 16.366432, 2.1744823,
 metadata/_custom_type_script = "uid://c8cmujrxj2dq7"
 
 [node name="SquadMultiMeshInstance3D" type="MultiMeshInstance3D" parent="." unique_id=582147531 node_paths=PackedStringArray("Camera", "TargetMarker", "ObstaclesRoot", "BombSpawner", "DrawableGround", "MouseGlobalPositionNode", "SpawnPoint", "HogLabels")]
-material_override = SubResource("StandardMaterial3D_hhcpw")
+material_override = SubResource("ShaderMaterial_hhcpw")
 multimesh = SubResource("MultiMesh_thnk1")
 script = ExtResource("20_jt61w")
 NumBodies = 10000

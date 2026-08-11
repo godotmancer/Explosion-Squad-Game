@@ -293,6 +293,19 @@ const uint INST_ROW_CUSTOM = 4u; // (speed, health, state bits, time)
 // as it travels instead of every infected hog looking equally lit.
 const float CONTAGION_FADE_TIME = 1.5;
 
+// Contagion tint: a display-range hue and an HDR gain applied to it. The gains are above 1.0
+// on purpose. shaders/hog_contagion.gdshader renormalises the in-range part of an instance
+// colour into ALBEDO and turns everything above 1.0 into EMISSION, so the gain — not the hue —
+// is what makes an infected hog bloom through the WorldEnvironment's HDR glow instead of just
+// reading as a brighter albedo that dies in shadow. Keep every hue channel <= 1.0 so the gain
+// alone controls how hot a contagion looks; a gain of 1.0 would emit nothing at all.
+const vec3  FIRE_TINT   = vec3(1.0, 0.08, 0.0);
+const float FIRE_GLOW   = 2.1;
+const vec3  POISON_TINT = vec3(0.18, 1.0, 0.12);
+const float POISON_GLOW = 2.1;
+const vec3  DRUNK_TINT  = vec3(0.62, 0.06, 1.0);
+const float DRUNK_GLOW  = 2.3;
+
 
 // =============================================================================
 // UTILITY FUNCTIONS
@@ -1165,17 +1178,23 @@ void main() {
     // transform pass read the buffer back after a barrier. Projectile hits are unaffected —
     // those land in the previous dispatch. One frame at 60 Hz is not observable, and avoiding
     // an extra coherent read of the expiry per body is the whole point of the merge.
+    //
+    // The colours below leave the display range (see FIRE_GLOW and friends) — the pulse now
+    // scales the whole colour rather than one channel, so it modulates the glow instead of
+    // sliding the hue. The fade still lerps from white, so it doubles as a glow fade: a hop
+    // late in its window sits near 1.0 and emits nothing, and only a freshly infected hog is
+    // hot enough to bloom.
     vec3 tint = vec3(1.0);
     if (self.contagion_expiry_u > now_u) {
         vec3 contagion_tint = vec3(1.0);
         if ((final_state & STATE_ON_FIRE) != 0u) {
             float pulse = 0.8 + 0.2 * sin(time * 10.0 + float(id) * 0.7);
-            contagion_tint = vec3(pulse, 0.25, 0.0);
+            contagion_tint = FIRE_TINT * (FIRE_GLOW * pulse);
         } else if ((final_state & STATE_POISONED) != 0u) {
-            contagion_tint = vec3(0.15, 0.9, 0.1);
+            contagion_tint = POISON_TINT * POISON_GLOW;
         } else if ((final_state & STATE_DRUNK) != 0u) {
             float pulse = 0.7 + 0.3 * sin(time * 4.0 + float(id) * 1.3);
-            contagion_tint = vec3(0.6 * pulse, 0.05, 0.9);
+            contagion_tint = DRUNK_TINT * (DRUNK_GLOW * pulse);
         }
         float remaining = float(self.contagion_expiry_u - now_u) / CONT_TIME_SCALE;
         tint = mix(vec3(1.0), contagion_tint, clamp(remaining / CONTAGION_FADE_TIME, 0.0, 1.0));
