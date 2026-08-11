@@ -17,7 +17,7 @@
 [ext_resource type="ArrayMesh" uid="uid://c0hyygqjbtu0h" path="res://assets/kenney_blaster-kit_2.1/Models/OBJ format/scope-small.obj" id="14_hhcpw"]
 [ext_resource type="Script" uid="uid://c8cmujrxj2dq7" path="res://components/LookAtTracker.gd" id="17_x3yn0"]
 [ext_resource type="Material" uid="uid://cvhd2bf5npt50" path="res://assets/kenney_cube-pets_1.0/Models/GLB format/animal-hog-colormap.tres" id="18_1w2xm"]
-[ext_resource type="ArrayMesh" path="res://assets/animal_hog_merged.tres" id="19_gngx1"]
+[ext_resource type="ArrayMesh" uid="uid://chja4353q4p7l" path="res://assets/animal_hog_merged.tres" id="19_gngx1"]
 [ext_resource type="Script" uid="uid://caee4ratqb6ko" path="res://compute_shaders/SquadMultiMeshInstance3D.cs" id="20_jt61w"]
 [ext_resource type="PackedScene" uid="uid://coyvpfanfk8dw" path="res://visuals/DeathFxScene.tscn" id="21_v8qla"]
 [ext_resource type="PackedScene" uid="uid://b0j6wj3dwfmnd" path="res://visuals/HogLabels.tscn" id="22_y1tbi"]
@@ -595,7 +595,7 @@ metadata/_custom_type_script = "uid://c8cmujrxj2dq7"
 material_override = ExtResource("18_1w2xm")
 multimesh = SubResource("MultiMesh_thnk1")
 script = ExtResource("20_jt61w")
-NumBodies = 20000
+NumBodies = 10000
 BodyRadius = 0.15
 YOffset = -0.25
 HogGravityScale = 4.5

@@ -34,6 +34,7 @@ settings/stdout/print_gpu_profile=true
 window/size/viewport_width=780
 window/size/viewport_height=1080
 window/size/initial_position_type=4
+window/size/always_on_top=true
 window/hdr/request_hdr_output=true
 window/dpi/allow_hidpi=false
 window/vsync/vsync_mode=0
@@ -262,6 +263,6 @@ virtual_controller/ios/enable_button_y=true
 
 [rendering]
 
-shader_compiler/shader_cache/strip_debug=true
 viewport/hdr_2d=true
+anti_aliasing/quality/msaa_3d=1
 environment/defaults/default_clear_color=Color(0, 0, 0, 1)
