@@ -1,0 +1,6 @@
+[gd_scene format=3 uid="uid://ctgna8fk3wq1m"]
+
+[ext_resource type="Script" uid="uid://7wmc4p5g4lkn" path="res://components/GateAnimation.gd" id="1_gt8an"]
+
+[node name="GateAnimation" type="Node" unique_id=1032076873]
+script = ExtResource("1_gt8an")

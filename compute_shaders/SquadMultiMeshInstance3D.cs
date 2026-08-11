@@ -93,6 +93,9 @@ public sealed partial class SquadMultiMeshInstance3D : MultiMeshInstance3D
   [Export]
   public Node3D MouseGlobalPositionNode { get; set; }
 
+  [Export]
+  public Node3D SpawnPoint { get; set; }
+
   [ExportGroup("State Labels")]
   [Export]
   public Node HogLabels { get; set; }
@@ -285,6 +288,7 @@ public sealed partial class SquadMultiMeshInstance3D : MultiMeshInstance3D
     public float DamagedTime;
     public uint State;
     public uint DamageAccum;
+
     // Absolute time (x256) at which the contagion lapses, not a remaining duration.
     // Raised by atomicMax in projectile_compute / physics_compute and never decremented.
     public uint ContagionExpiryU;
@@ -439,7 +443,6 @@ public sealed partial class SquadMultiMeshInstance3D : MultiMeshInstance3D
   public const int PHYS_PUSH_FRAME_PARITY = 12; // uint  frame_parity (0 or 1)
   public const int PHYS_PUSH_HOG_GRAVITY_SCALE = 13; // float hog_gravity_scale
 
-
   private int _numObstacles;
   private uint _obstacleBufferSize;
   private uint _bombBufferSize;
@@ -482,7 +485,7 @@ public sealed partial class SquadMultiMeshInstance3D : MultiMeshInstance3D
   // Two pre-allocated dicts swapped each frame — no per-frame allocation for movable obstacles
   private Dictionary<CollisionShape3D, (Vector2 center, float yRot)> _prevObstacleState = [];
   private Dictionary<CollisionShape3D, (Vector2 center, float yRot)> _currentObstacleState = [];
-  private RandomNumberGenerator _rndGen;
+  private RandomNumberGenerator _rndGen = new();
 
   // Per-body state tracking (allocated to _bodyCapacity, grown in SpawnHogs)
   private byte[] _hogStates; // current HogBehaviourState per body
@@ -546,6 +549,7 @@ public sealed partial class SquadMultiMeshInstance3D : MultiMeshInstance3D
 
   public override void _Ready()
   {
+    _rndGen.Seed = 1234;
     _targetPos = new Vector2(TargetMarker.GlobalPosition.X, TargetMarker.GlobalPosition.Z);
     SetupMultiMesh();
     SetupCompute();

@@ -27,7 +27,6 @@ Global="*uid://c4sihd8rawspw"
 [debug]
 
 settings/stdout/print_fps=true
-settings/stdout/print_gpu_profile=true
 
 [display]
 

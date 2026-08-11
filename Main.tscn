@@ -15,6 +15,9 @@
 [ext_resource type="ArrayMesh" uid="uid://bjcpccvrwecqp" path="res://assets/kenney_modular-space-kit_1.0/Models/OBJ format/gate-lasers.obj" id="12_o7g6l"]
 [ext_resource type="PackedScene" uid="uid://cp2b01axdkacc" path="res://visuals/DrawableGround.tscn" id="13_hhcpw"]
 [ext_resource type="ArrayMesh" uid="uid://c0hyygqjbtu0h" path="res://assets/kenney_blaster-kit_2.1/Models/OBJ format/scope-small.obj" id="14_hhcpw"]
+[ext_resource type="Script" uid="uid://7wmc4p5g4lkn" path="res://components/GateAnimation.gd" id="14_mxvw5"]
+[ext_resource type="Script" uid="uid://2rgi7g20phcd" path="res://scripts/LatchButtonStaticBody3d.gd" id="14_xrxkg"]
+[ext_resource type="PackedScene" uid="uid://cj4g2em7nie7m" path="res://components/GateOpenCloseTimer.tscn" id="16_xrxkg"]
 [ext_resource type="Script" uid="uid://c8cmujrxj2dq7" path="res://components/LookAtTracker.gd" id="17_x3yn0"]
 [ext_resource type="Script" uid="uid://caee4ratqb6ko" path="res://compute_shaders/SquadMultiMeshInstance3D.cs" id="20_jt61w"]
 [ext_resource type="PackedScene" uid="uid://coyvpfanfk8dw" path="res://visuals/DeathFxScene.tscn" id="21_v8qla"]
@@ -204,9 +207,15 @@ backlight = Color(0.60609305, 0.6174238, 0, 1)
 [sub_resource type="BoxMesh" id="BoxMesh_hhcpw"]
 size = Vector3(15, 1.5, 1.8)
 
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_xrxkg"]
+albedo_color = Color(0, 1, 0, 1)
+
 [sub_resource type="CylinderMesh" id="CylinderMesh_ng1tg"]
 top_radius = 1.4111328
 bottom_radius = 1.4111328
+
+[sub_resource type="SphereShape3D" id="SphereShape3D_ng1tg"]
+radius = 1.797204
 
 [sub_resource type="SphereShape3D" id="SphereShape3D_ovyh0"]
 radius = 2.5
@@ -219,6 +228,7 @@ material = SubResource("StandardMaterial3D_a0gqe")
 size = Vector3(0.25, 2.09, 0.25)
 
 [sub_resource type="StandardMaterial3D" id="StandardMaterial3D_hhcpw"]
+vertex_color_use_as_albedo = true
 albedo_color = Color(0.89081144, 0.5641828, 0.24339655, 1)
 
 [sub_resource type="BoxMesh" id="BoxMesh_5uiug"]
@@ -246,6 +256,9 @@ mouse_global_pos = NodePath("MouseTargetLocation")
 projectile_spawn_marker = NodePath("TargetMarker/HeadHogAnchor/HeadHog/HogsSquadsMesh/HeadHogProjectileMarker")
 projectile_scn = ExtResource("2_mxvw5")
 teleport_marker = NodePath("TeleportMarker")
+
+[node name="SpawnPoint" type="Marker3D" parent="." unique_id=1782845654]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 19.071808, 2.0708847, 81.185196)
 
 [node name="Basic3DScene" parent="." unique_id=1357049663 instance=ExtResource("3_xrxkg")]
 
@@ -598,7 +611,27 @@ mesh = SubResource("BoxMesh_hhcpw")
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -4.878231, 0, 0)
 
 [node name="GatePivotEnclosureMesh" type="MeshInstance3D" parent="Obstacles/Movable/PlayPenGate/Pivot" unique_id=1304211712]
+material_override = SubResource("StandardMaterial3D_xrxkg")
 mesh = SubResource("CylinderMesh_ng1tg")
+
+[node name="LatchButtonStaticBody3D" type="StaticBody3D" parent="Obstacles/Movable/PlayPenGate/Pivot/GatePivotEnclosureMesh" unique_id=838760937 node_paths=PackedStringArray("mesh_instance", "gate_open_close_timer")]
+script = ExtResource("14_xrxkg")
+mesh_instance = NodePath("..")
+gate_open_close_timer = NodePath("../../../GateOpenCloseTimer")
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="Obstacles/Movable/PlayPenGate/Pivot/GatePivotEnclosureMesh/LatchButtonStaticBody3D" unique_id=1379838054]
+shape = SubResource("SphereShape3D_ng1tg")
+
+[node name="GateAnimation" type="Node" parent="Obstacles/Movable/PlayPenGate" unique_id=1217999264 node_paths=PackedStringArray("rotation_pivot")]
+script = ExtResource("14_mxvw5")
+rotation_pivot = NodePath("../Pivot")
+duration = 2.5
+_closed_transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 17.043266, 0, 71.193756)
+_closed_captured = true
+metadata/_custom_type_script = "uid://7wmc4p5g4lkn"
+
+[node name="GateOpenCloseTimer" parent="Obstacles/Movable/PlayPenGate" unique_id=616260880 node_paths=PackedStringArray("gate_animation") instance=ExtResource("16_xrxkg")]
+gate_animation = NodePath("../GateAnimation")
 
 [node name="MarkerBlock" type="Area3D" parent="Obstacles/Movable" unique_id=1316146510]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 16.366432, 0.7748052, -3.763482)
@@ -665,7 +698,7 @@ target = NodePath("../../../../MouseTargetLocation")
 _editor_transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 16.366432, 2.1744823, -3.763482)
 metadata/_custom_type_script = "uid://c8cmujrxj2dq7"
 
-[node name="SquadMultiMeshInstance3D" type="MultiMeshInstance3D" parent="." unique_id=582147531 node_paths=PackedStringArray("Camera", "TargetMarker", "ObstaclesRoot", "BombSpawner", "DrawableGround", "MouseGlobalPositionNode", "HogLabels")]
+[node name="SquadMultiMeshInstance3D" type="MultiMeshInstance3D" parent="." unique_id=582147531 node_paths=PackedStringArray("Camera", "TargetMarker", "ObstaclesRoot", "BombSpawner", "DrawableGround", "MouseGlobalPositionNode", "SpawnPoint", "HogLabels")]
 material_override = SubResource("StandardMaterial3D_hhcpw")
 multimesh = SubResource("MultiMesh_thnk1")
 script = ExtResource("20_jt61w")
@@ -690,6 +723,7 @@ DeathFearForce = 50.0
 BombSpawner = NodePath("../BombSpawner")
 DrawableGround = NodePath("../DrawableGround")
 MouseGlobalPositionNode = NodePath("../MouseTargetLocation")
+SpawnPoint = NodePath("../SpawnPoint")
 HogLabels = NodePath("../HogsLabels")
 MaxVisibleLabels = 200
 
@@ -752,6 +786,8 @@ hogs_mesh_instances = NodePath("../../../SquadMultiMeshInstance3D")
 
 [node name="Marker2D" type="Marker2D" parent="HUD/VSplitContainer/HogsKilled" unique_id=140142961]
 position = Vector2(33, 12)
+
+[connection signal="input_event" from="Obstacles/Movable/PlayPenGate/Pivot/GatePivotEnclosureMesh/LatchButtonStaticBody3D" to="Obstacles/Movable/PlayPenGate/Pivot/GatePivotEnclosureMesh/LatchButtonStaticBody3D" method="_on_input_event"]
 
 [editable path="Basic3DScene"]
 [editable path="Obstacles/Static/MultiplyGate/LaserGateMesh"]

@@ -30,19 +30,22 @@ public sealed partial class SquadMultiMeshInstance3D
     // Initialize bodies (staging array is only needed until the GPU buffer is created)
     _bodyCapacity = NumBodies;
     var bodiesData = new GpuBody[_bodyCapacity];
-    _rndGen = new RandomNumberGenerator();
-    _rndGen.Randomize();
 
     _hogStates = new byte[_bodyCapacity];
 
     for (var i = 0; i < NumBodies; i++)
     {
+      var position = new Vector2(
+        _rndGen.RandfRange(-30.0f, 30.0f),
+        _rndGen.RandfRange(-60.0f, 60.0f)
+      );
+      if (SpawnPoint != null)
+      {
+        position = new Vector2(SpawnPoint.Position.X, SpawnPoint.Position.Z);
+      }
       bodiesData[i] = new GpuBody
       {
-        Position = new Vector2(
-          _rndGen.RandfRange(-30.0f, 30.0f),
-          _rndGen.RandfRange(-60.0f, 60.0f)
-        ),
+        Position = position,
         Velocity = Vector2.Zero,
         Height = YOffset,
         VerticalVelocity = 0.0f,
@@ -273,7 +276,6 @@ public sealed partial class SquadMultiMeshInstance3D
     floats[PHYS_PUSH_HOG_GRAVITY_SCALE] = HogGravityScale;
   }
 
-
   private void WriteHashBuildPush(int numBodies, float yOffset)
   {
     var floats = MemoryMarshal.Cast<byte, float>(_hashPushBytes.AsSpan());
@@ -284,7 +286,6 @@ public sealed partial class SquadMultiMeshInstance3D
     floats[HASH_PUSH_Y_OFFSET] = yOffset;
     floats[3] = 0f; // pad
   }
-
 
   private void RebuildPhysicsUniformSet()
   {
@@ -313,11 +314,7 @@ public sealed partial class SquadMultiMeshInstance3D
     heu.AddId(_hashEntriesBuffer);
     // Binding 5: MultiMesh instance data, written at the tail of physics_compute. This used to
     // be a separate transform_compute dispatch.
-    var tu = new RDUniform
-    {
-      UniformType = RenderingDevice.UniformType.StorageBuffer,
-      Binding = 5,
-    };
+    var tu = new RDUniform { UniformType = RenderingDevice.UniformType.StorageBuffer, Binding = 5 };
     tu.AddId(_transformBuffer);
     _physicsUniformSet = _rd.UniformSetCreate([pu, ou, bu, hcu, heu, tu], _physicsShader, 0);
   }

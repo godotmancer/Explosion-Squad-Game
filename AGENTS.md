@@ -96,7 +96,8 @@ Explosion-Squad-Game/
 │   └── *.tres                                 # Bullet, Fire, Poison, Drunk, Teleport abilities
 ├── bombs/
 │   └── BombSpawner.cs                         # Spawns bomb visual + invokes DropBomb callback
-├── components/               # GDScript @tool components (Animator, LookAtTracker)
+├── components/               # GDScript @tool components (Animator, LookAtTracker,
+│                             #   GateAnimation)
 ├── visuals/                  # GDScript FX (DrawableGround, HogLabels, Announce3D, DeathFx)
 ├── compositor_fx/            # Post-process Outline effect (GDScript + GLSL)
 ├── shaders/                  # Visual-only gdshaders (black hole, openvat, broken TV)
@@ -423,6 +424,11 @@ allocates) stays off the per-frame path for movable trimeshes.
 
 All cross-system signals are declared on the `Global` autoload (`Global.gd`).
 Components connect to `Global`, never to each other directly.
+
+The exception is a component's own lifecycle: a signal about nothing but the node it is
+attached to may be declared on the component, since there is no cross-system coupling to
+route through `Global`. `GateAnimation.fully_opened` / `fully_closed` are the current
+example. Anything a *second* system reacts to still belongs on `Global`.
 
 ```
 Global.gd signals:
