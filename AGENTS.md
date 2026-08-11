@@ -200,7 +200,7 @@ mechanism — it preserves the public API and requires no scene-file changes.
 | `SquadMultiMeshInstance3D.cs` | All `[Export]` properties, all inner types (`GpuBody`, `BombState`, `ProjectileAbility`, enums), all `[Signal]` declarations, all private field declarations, all buffer-layout constants, lifecycle (`_Ready` / `_Process` / `_PhysicsProcess` / `_UnhandledInput`), `SpawnHogs`, `UpdateTargetFromMouse` |
 | `GpuSetup.cs` | `SetupCompute`, `SetupMultiMesh`, `Dispose`, `WriteXxxPush`, `RebuildXxxUniformSet`, `VerifyPipeline`, `SampleHashOverflow` |
 | `GpuQueue.cs` | `GpuTarget` / `GpuCommandKind` enums, `GpuCommand` struct, `_gpuCommands` / `_gpuPayload` / `_gpuScratch`, `EnqueueGpuWrite`, `EnqueueGrowPhysics`, `EnqueueGrowObstacles`, `FlushGpuCommands`, `ResolveGpuTarget`, `ApplyPhysicsGrowth`, `ApplyObstacleGrowth`, `FreeGpuRid`. **The only file allowed to call `RenderingDevice` mutators.** |
-| `Obstacles.cs` | Obstacle cache, `ExtractObstacles`, `EmitObstacleDataArray/List`, `WriteObstacle`, `ComputeMinObb`, `FindCollisionShapes`, `UpdateObstacleBuffer` |
+| `Obstacles.cs` | Obstacle cache, `ExtractObstacles`, `EmitObstacleDataArray/List`, `WriteObstacle`, `ComputeMinObb`, `DecomposeTrimeshFootprint`, `ObstacleSlotCount`, `FindCollisionShapes`, `UpdateObstacleBuffer` |
 | `Projectiles.cs` | `SpawnProjectile`, `UploadPendingProjectiles`, `UpdateProjectileLifetimes`, `RegisterProjectileHitCallback`, `WriteProjectilePush` |
 | `Bombs.cs` | `DrainDeathFxQueue`, `OnDeathFxFinished`, `OnHogDied`, `DropBomb`, `UpdateBombBuffer` |
 | `TriggerZones.cs` | `ProcessTriggerZones`, `DamageHogViaBuffer`, `ScanForTriggers`, `GetTriggerBounds`, `IsInsideCircle/OBB`, `TriggerKey` |
@@ -396,8 +396,26 @@ is derived the same way from Y-axis Euler angle delta, wrapped into `[-π, π]`.
 
 `SphereShape3D` and `CylinderShape3D` → circle obstacle.
 `BoxShape3D` → OBB.
-`ConvexPolygonShape3D` and `ConcavePolygonShape3D` → minimum OBB computed by
-`ComputeMinObb` (rotating-calipers approximation).
+`ConvexPolygonShape3D` → minimum OBB computed by `ComputeMinObb`
+(rotating-calipers approximation).
+`ConcavePolygonShape3D` → **multiple** OBBs, one per rectangle of the decomposed
+X-Z footprint (`DecomposeTrimeshFootprint`). A single OBB would fill in the mesh's
+holes, so hogs would skirt a hollow play pen instead of walking into it.
+
+The decomposition projects every triangle onto X-Z (for a closed mesh this covers
+exactly the footprint, while holes stay empty because the walls bounding them
+project to zero-area lines), rasterises them onto a grid whose lines are the vertex
+coordinates themselves, then greedily merges solid cells into maximal rectangles.
+Exact for the rectilinear footprints CSG bakes produce — the `PlayPen` U-shape
+resolves to 3 wall OBBs. Meshes with more than `FOOTPRINT_MAX_SLABS` distinct
+coordinates on an axis fall back to a uniform grid (stair-stepped, warns); output is
+capped at `FOOTPRINT_MAX_RECTS` per shape (warns).
+
+Because a shape can emit more than one obstacle, buffer sizing goes through
+`ObstacleSlotCount` — **keep it in sync with `EmitObstacleData`**. Results are cached
+in `_concaveFootprints`, keyed on the shape resource: the rects are shape-local, so
+they survive movement and `InvalidateObstacleCache`, and `GetFaces()` (which
+allocates) stays off the per-frame path for movable trimeshes.
 
 ---
 

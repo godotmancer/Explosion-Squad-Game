@@ -452,6 +452,11 @@ public sealed partial class SquadMultiMeshInstance3D : MultiMeshInstance3D
   private List<CollisionShape3D> _movableShapes;
   private float[] _staticObstacleData; // computed once, reused every frame
 
+  // Trimesh (ConcavePolygonShape3D) footprints decomposed into axis-aligned rectangles,
+  // keyed on the shape resource. Local space, so entries outlive obstacle movement and
+  // cache invalidation; only editing the shape data itself would make one stale.
+  private readonly Dictionary<ConcavePolygonShape3D, FootprintRect[]> _concaveFootprints = [];
+
   // Nodes whose VisibilityChanged signal is connected for auto cache-invalidation.
   // Populated in EnsureObstacleCache(), cleared in InvalidateObstacleCache().
   private readonly List<Node3D> _visibilityTrackedNodes = [];

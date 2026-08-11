@@ -1,4 +1,4 @@
-[gd_scene format=3 uid="uid://c0m784riw25wo"]
+[gd_scene format=4 uid="uid://c0m784riw25wo"]
 
 [ext_resource type="Script" uid="uid://csibeslj5kexm" path="res://Main.gd" id="1_hhcpw"]
 [ext_resource type="PackedScene" uid="uid://b8j01rb3028ke" path="res://projectiles/SimpleProjectile.tscn" id="2_mxvw5"]
@@ -16,8 +16,6 @@
 [ext_resource type="PackedScene" uid="uid://cp2b01axdkacc" path="res://visuals/DrawableGround.tscn" id="13_hhcpw"]
 [ext_resource type="ArrayMesh" uid="uid://c0hyygqjbtu0h" path="res://assets/kenney_blaster-kit_2.1/Models/OBJ format/scope-small.obj" id="14_hhcpw"]
 [ext_resource type="Script" uid="uid://c8cmujrxj2dq7" path="res://components/LookAtTracker.gd" id="17_x3yn0"]
-[ext_resource type="Material" uid="uid://cvhd2bf5npt50" path="res://assets/kenney_cube-pets_1.0/Models/GLB format/animal-hog-colormap.tres" id="18_1w2xm"]
-[ext_resource type="ArrayMesh" uid="uid://chja4353q4p7l" path="res://assets/animal_hog_merged.tres" id="19_gngx1"]
 [ext_resource type="Script" uid="uid://caee4ratqb6ko" path="res://compute_shaders/SquadMultiMeshInstance3D.cs" id="20_jt61w"]
 [ext_resource type="PackedScene" uid="uid://coyvpfanfk8dw" path="res://visuals/DeathFxScene.tscn" id="21_v8qla"]
 [ext_resource type="PackedScene" uid="uid://b0j6wj3dwfmnd" path="res://visuals/HogLabels.tscn" id="22_y1tbi"]
@@ -145,6 +143,20 @@ size = Vector3(2.341278, 1, 0.17626953)
 [sub_resource type="BoxShape3D" id="BoxShape3D_pm6ea"]
 size = Vector3(0.75585556, 1, 0.17626953)
 
+[sub_resource type="ArrayMesh" id="ArrayMesh_bg4s2"]
+_surfaces = [{
+"aabb": AABB(-7.5, -0.5, -9, 15, 1, 18),
+"attribute_data": PackedByteArray("q6oqPwAAgD9jgjA/gqsGP2OCMD8AAIA/AACAPwAAAD9IKHo/AAAAPwAAgD8AAAAAq6oqPwAAgD+rqio/AAAAP2OCMD+CqwY/AAAAAAAAgD+rqqo+AAAAP6uqqj4AAIA/q6oqPwAAAD8AAIA/AAAAP2OCMD+CqwY/AACAPwAAAABIKHo/AAAAP0goej8AAAAAAAAAAAAAgD8AAAAAAAAAP6uqqj4AAAA/q6oqPwAAgD/z0iQ/AACAP6uqKj8AAAA/q6oqPwAAAD/z0iQ/AACAP/PSJD+CqwY/AAAAAAAAAD8AAAAAAAAAAKuqqj4AAAAAq6oqPwAAAD/z0iQ/gqsGP6e8tT6CqwY/AACAPwAAgD8Cd3o/AACAPwAAgD8AAAA/q6oqPwAAAD+pMzA/AAAAAKkzMD8AAAA/q6oqPwAAAD+rqqo+AAAAP6uqKj8AAAAAAACAPwAAAD8Cd3o/gqsGP2OCMD+CqwY/AAAAAAAAAD+rqqo+AAAAAKuqqj4AAAA/AACAPwAAAD8Cd3o/AACAPwJ3ej+CqwY/q6oqPwAAAD+rqio/AAAAAKkzMD8AAAAAq6qqPgAAgD+nvLU+gqsGP6e8tT4AAIA/q6oqPwAAAD+nvLU+gqsGP6uqqj4AAAA/q6qqPgAAAD+rqqo+AAAAAKuqKj8AAAAAq6qqPgAAgD+rqqo+AAAAP6e8tT6CqwY/mpBIPQAAYD+rqqo+AABgP5qQSD0AACA/AAAAAAAAwD6rqqo+AADAPgAAAAAAAAA+mpBIPQAAID+rqqo+AABgP6uqqj4AACA/oSEePwAAwD6rqqo+AAAAPquqqj4AAMA+oSEePwAAAD6rqqo+AAAAPqEhHj8AAMA+AAAAAAAAAD6rqqo+AADAPquqqj4AAAA+"),
+"format": 34359738391,
+"primitive": 3,
+"uv_scale": Vector4(0, 0, 0, 0),
+"vertex_count": 84,
+"vertex_data": PackedByteArray("AADwwAAAAL8AABDBliLPwAAAAL8c/gBBliLPwAAAAL8AABDBAADwwAAAAL8AABDBliLPwAAAAL8AABDBAADwwAAAAD8AABDBAADwwAAAAL8AABDBAADwwAAAAL8AABBBliLPwAAAAL8c/gBBAADwwAAAAL8AABDBAADwwAAAAD8AABBBAADwwAAAAL8AABBBAADwwAAAAL8AABBBAADwQAAAAL8AABBBliLPwAAAAL8c/gBBAADwwAAAAD8AABDBliLPwAAAAL8AABDBliLPwAAAAD8AABDBAADwwAAAAL8AABDBAADwwAAAAD8AABDBAADwwAAAAD8AABBBAADwwAAAAD8AABDBliLPwAAAAD8AABDBAADwwAAAAD8AABBBAADwwAAAAD8AABBBliLPwAAAAD8AABDBliLPwAAAAD8c/gBBAADwwAAAAL8AABBBAADwwAAAAD8AABBBAADwQAAAAD8AABBBAADwwAAAAD8AABBBliLPwAAAAD8c/gBBat3QQAAAAD8c/gBBAADwQAAAAL8AABDBat3QQAAAAL8AABDBAADwQAAAAL8AABBBAADwQAAAAL8AABDBat3QQAAAAD8AABDBat3QQAAAAL8AABDBAADwQAAAAL8AABDBAADwQAAAAL8AABBBAADwQAAAAD8AABDBAADwQAAAAL8AABBBat3QQAAAAL8c/gBBliLPwAAAAL8c/gBBAADwwAAAAL8AABBBAADwQAAAAD8AABBBAADwQAAAAL8AABBBAADwQAAAAL8AABBBat3QQAAAAL8AABDBat3QQAAAAL8c/gBBAADwQAAAAL8AABDBAADwQAAAAD8AABDBat3QQAAAAD8AABDBAADwQAAAAD8AABDBat3QQAAAAD8c/gBBat3QQAAAAD8AABDBAADwwAAAAD8AABBBat3QQAAAAD8c/gBBAADwQAAAAD8AABBBAADwQAAAAL8AABBBAADwQAAAAD8AABBBAADwQAAAAD8AABDBAADwQAAAAD8AABDBAADwQAAAAD8AABBBat3QQAAAAD8c/gBBliLPwAAAAL8AABDBliLPwAAAAL8c/gBBliLPwAAAAD8AABDBliLPwAAAAL8c/gBBat3QQAAAAL8c/gBBliLPwAAAAD8c/gBBliLPwAAAAD8AABDBliLPwAAAAL8c/gBBliLPwAAAAD8c/gBBat3QQAAAAL8AABDBat3QQAAAAD8c/gBBat3QQAAAAL8c/gBBat3QQAAAAD8AABDBat3QQAAAAD8c/gBBat3QQAAAAL8AABDBliLPwAAAAD8c/gBBat3QQAAAAL8c/gBBat3QQAAAAD8c/gBB/38AAP///7//fwAA////v/9/AAD///+//////wAA/7//////AAD/v/////8AAP+//38AAP///7//fwAA////v/9/AAD///+/AAD/f/9//78AAP9//3//vwAA/3//f/+//38AAP///7//fwAA////v/9/AAD///+//////wAA/7//////AAD/v/////8AAP+/AAD/f/9//78AAP9//3//vwAA/3//f/+//3///wAA/7//f///AAD/v/9///8AAP+//3///wAA/7//f///AAD/v/9///8AAP+//3//f////7//f/9/////v/9//3////+//3///wAA/7//f///AAD/v/9///8AAP+//38AAP///7//fwAA////v/9/AAD///+//////wAA/7//////AAD/v/////8AAP+/////f/////////9//////////3///////38AAP///7//fwAA////v/9/AAD///+//3//f////7//f/9/////v/9//3////+//38AAP///7//fwAA////v/9/AAD///+//////wAA/7//////AAD/v/////8AAP+//3///wAA/7//f///AAD/v/9///8AAP+//3///wAA/7//f///AAD/v/9///8AAP+/////f/////////9//////////3///////3///wAA/7//f///AAD/v/9///8AAP+/////f/9//z////9//3//P////3//f/8//////////z//////////P/////////8/////f/9//z////9//3//P////3//f/8/AAD/f///AAAAAP9///8AAAAA/3///wAAAAD/f///AAAAAP9///8AAAAA/3///wAA/////////z//////////P/////////8/")
+}]
+
+[sub_resource type="ConcavePolygonShape3D" id="ConcavePolygonShape3D_hhcpw"]
+data = PackedVector3Array(-7.5, -0.5, -9, -6.472972, -0.5, 8.062038, -6.472972, -0.5, -9, -7.5, -0.5, -9, -6.472972, -0.5, -9, -7.5, 0.5, -9, -7.5, -0.5, -9, -7.5, -0.5, 9, -6.472972, -0.5, 8.062038, -7.5, -0.5, -9, -7.5, 0.5, 9, -7.5, -0.5, 9, -7.5, -0.5, 9, 7.5, -0.5, 9, -6.472972, -0.5, 8.062038, -7.5, 0.5, -9, -6.472972, -0.5, -9, -6.472972, 0.5, -9, -7.5, -0.5, -9, -7.5, 0.5, -9, -7.5, 0.5, 9, -7.5, 0.5, -9, -6.472972, 0.5, -9, -7.5, 0.5, 9, -7.5, 0.5, 9, -6.472972, 0.5, -9, -6.472972, 0.5, 8.062038, -7.5, -0.5, 9, -7.5, 0.5, 9, 7.5, 0.5, 9, -7.5, 0.5, 9, -6.472972, 0.5, 8.062038, 6.527028, 0.5, 8.062038, 7.5, -0.5, -9, 6.527028, -0.5, -9, 7.5, -0.5, 9, 7.5, -0.5, -9, 6.527028, 0.5, -9, 6.527028, -0.5, -9, 7.5, -0.5, -9, 7.5, -0.5, 9, 7.5, 0.5, -9, 7.5, -0.5, 9, 6.527028, -0.5, 8.062038, -6.472972, -0.5, 8.062038, -7.5, -0.5, 9, 7.5, 0.5, 9, 7.5, -0.5, 9, 7.5, -0.5, 9, 6.527028, -0.5, -9, 6.527028, -0.5, 8.062038, 7.5, -0.5, -9, 7.5, 0.5, -9, 6.527028, 0.5, -9, 7.5, 0.5, -9, 6.527028, 0.5, 8.062038, 6.527028, 0.5, -9, -7.5, 0.5, 9, 6.527028, 0.5, 8.062038, 7.5, 0.5, 9, 7.5, -0.5, 9, 7.5, 0.5, 9, 7.5, 0.5, -9, 7.5, 0.5, -9, 7.5, 0.5, 9, 6.527028, 0.5, 8.062038, -6.472972, -0.5, -9, -6.472972, -0.5, 8.062038, -6.472972, 0.5, -9, -6.472972, -0.5, 8.062038, 6.527028, -0.5, 8.062038, -6.472972, 0.5, 8.062038, -6.472972, 0.5, -9, -6.472972, -0.5, 8.062038, -6.472972, 0.5, 8.062038, 6.527028, -0.5, -9, 6.527028, 0.5, 8.062038, 6.527028, -0.5, 8.062038, 6.527028, 0.5, -9, 6.527028, 0.5, 8.062038, 6.527028, -0.5, -9, -6.472972, 0.5, 8.062038, 6.527028, -0.5, 8.062038, 6.527028, 0.5, 8.062038)
+
 [sub_resource type="StandardMaterial3D" id="StandardMaterial3D_mxvw5"]
 resource_name = "colormap"
 cull_mode = 2
@@ -174,6 +186,28 @@ subsurf_scatter_strength = 0.79
 backlight_enabled = true
 backlight = Color(0.60609305, 0.6174238, 0, 1)
 
+[sub_resource type="BoxShape3D" id="BoxShape3D_bg4s2"]
+size = Vector3(15, 1, 1.8)
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_bg4s2"]
+albedo_color = Color(0.49063194, 0.40864435, 0.2893288, 1)
+metallic_specular = 0.84
+rim = 0.28
+rim_tint = 0.71
+clearcoat = 0.54
+clearcoat_roughness = 0.04
+subsurf_scatter_enabled = true
+subsurf_scatter_strength = 0.79
+backlight_enabled = true
+backlight = Color(0.60609305, 0.6174238, 0, 1)
+
+[sub_resource type="BoxMesh" id="BoxMesh_hhcpw"]
+size = Vector3(15, 1.5, 1.8)
+
+[sub_resource type="CylinderMesh" id="CylinderMesh_ng1tg"]
+top_radius = 1.4111328
+bottom_radius = 1.4111328
+
 [sub_resource type="SphereShape3D" id="SphereShape3D_ovyh0"]
 radius = 2.5
 
@@ -184,11 +218,17 @@ albedo_color = Color(1.1461712, 0.21721677, 1.1461712, 1)
 material = SubResource("StandardMaterial3D_a0gqe")
 size = Vector3(0.25, 2.09, 0.25)
 
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_hhcpw"]
+albedo_color = Color(0.89081144, 0.5641828, 0.24339655, 1)
+
+[sub_resource type="BoxMesh" id="BoxMesh_5uiug"]
+size = Vector3(0.75, 0.5, 0.75)
+
 [sub_resource type="MultiMesh" id="MultiMesh_thnk1"]
 transform_format = 1
 use_colors = true
 use_custom_data = true
-mesh = ExtResource("19_gngx1")
+mesh = SubResource("BoxMesh_5uiug")
 
 [sub_resource type="StandardMaterial3D" id="StandardMaterial3D_5hjr7"]
 albedo_color = Color(1.009, 1.009, 0, 1)
@@ -409,6 +449,17 @@ shape = SubResource("BoxShape3D_pm6ea")
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -1.6090002, 0.46206272, 0)
 shape = SubResource("BoxShape3D_pm6ea")
 
+[node name="PlayPen" type="Area3D" parent="Obstacles/Static" unique_id=1700362533]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 19.48375, 0, 79.33053)
+script = ExtResource("8_mxvw5")
+metadata/_custom_type_script = "uid://h8rsffid2vbl"
+
+[node name="CSGBakedMeshInstance3D" type="MeshInstance3D" parent="Obstacles/Static/PlayPen" unique_id=802400318]
+mesh = SubResource("ArrayMesh_bg4s2")
+
+[node name="CSGBakedCollisionShape3D" type="CollisionShape3D" parent="Obstacles/Static/PlayPen" unique_id=1758116624]
+shape = SubResource("ConcavePolygonShape3D_hhcpw")
+
 [node name="Movable" type="Node" parent="Obstacles" unique_id=693829813]
 
 [node name="RotatingDeathGate" type="Area3D" parent="Obstacles/Movable" unique_id=806778830]
@@ -526,6 +577,29 @@ _editor_origin = Vector3(-14.324436, 0, -34.55751)
 _editor_transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -14.324436, 0, -34.55751)
 metadata/_custom_type_script = "uid://bn6uolljecpu1"
 
+[node name="PlayPenGate" type="Area3D" parent="Obstacles/Movable" unique_id=1433063214]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 17.043266, 0, 71.193756)
+monitoring = false
+monitorable = false
+script = ExtResource("8_mxvw5")
+metadata/_custom_type_script = "uid://h8rsffid2vbl"
+metadata/_edit_group_ = true
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="Obstacles/Movable/PlayPenGate" unique_id=758441919]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 2.445, 0, 0)
+shape = SubResource("BoxShape3D_bg4s2")
+
+[node name="MeshInstance3D" type="MeshInstance3D" parent="Obstacles/Movable/PlayPenGate" unique_id=1923627489]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 2.4448013, 0, 0)
+material_override = SubResource("StandardMaterial3D_bg4s2")
+mesh = SubResource("BoxMesh_hhcpw")
+
+[node name="Pivot" type="Marker3D" parent="Obstacles/Movable/PlayPenGate" unique_id=690457333]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -4.878231, 0, 0)
+
+[node name="GatePivotEnclosureMesh" type="MeshInstance3D" parent="Obstacles/Movable/PlayPenGate/Pivot" unique_id=1304211712]
+mesh = SubResource("CylinderMesh_ng1tg")
+
 [node name="MarkerBlock" type="Area3D" parent="Obstacles/Movable" unique_id=1316146510]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 16.366432, 0.7748052, -3.763482)
 visible = false
@@ -592,7 +666,7 @@ _editor_transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 16.366432, 2.1744823,
 metadata/_custom_type_script = "uid://c8cmujrxj2dq7"
 
 [node name="SquadMultiMeshInstance3D" type="MultiMeshInstance3D" parent="." unique_id=582147531 node_paths=PackedStringArray("Camera", "TargetMarker", "ObstaclesRoot", "BombSpawner", "DrawableGround", "MouseGlobalPositionNode", "HogLabels")]
-material_override = ExtResource("18_1w2xm")
+material_override = SubResource("StandardMaterial3D_hhcpw")
 multimesh = SubResource("MultiMesh_thnk1")
 script = ExtResource("20_jt61w")
 NumBodies = 10000
