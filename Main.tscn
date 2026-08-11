@@ -229,8 +229,9 @@ material = SubResource("StandardMaterial3D_a0gqe")
 size = Vector3(0.25, 2.09, 0.25)
 
 [sub_resource type="ShaderMaterial" id="ShaderMaterial_hhcpw"]
+render_priority = 0
 shader = ExtResource("27_tint0")
-shader_parameter/albedo = Color(0.89081144, 0.5641828, 0.24339655, 1)
+shader_parameter/albedo = Color(0.33944762, 0.67354923, 0.91277045, 1)
 shader_parameter/glow_energy = 1.0
 
 [sub_resource type="BoxMesh" id="BoxMesh_5uiug"]
@@ -650,6 +651,7 @@ shape = SubResource("SphereShape3D_ovyh0")
 [node name="DrawableGround" parent="." unique_id=1829754505 node_paths=PackedStringArray("hogs_mesh_instances") instance=ExtResource("13_hhcpw")]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -0.25, 0)
 hogs_mesh_instances = NodePath("../SquadMultiMeshInstance3D")
+color = Color(0.34066033, 0.37065247, 0.24927363, 1)
 
 [node name="TargetMarker" type="MeshInstance3D" parent="." unique_id=1741522352]
 unique_name_in_owner = true

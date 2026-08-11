@@ -239,6 +239,26 @@ const float CONTAGION_SPREAD_DECAY = 0.6;
 const float CONTAGION_MIN_SPREAD_DUR = 0.35;
 const float DRUNK_JITTER_STR      = 10.5;  // velocity noise amplitude
 
+// A drunk hog unsettles the hogs immediately around it, and that unease eases off as the
+// drunkenness wears away. This feeds the SAME fear pipeline the bomb panic uses (see the
+// neighbour scan in main), so a spooked hog gets the usual lingering fear, flee steering and
+// IN_FEAR / FLEEING state rather than a parallel one-off effect.
+const float DRUNK_FEAR_RADIUS   = 2.0;  // "close neighbours" — deliberately inside the 3×3 scan's
+                                        // guaranteed coverage (HASH_CELL_SIZE), so the effect never
+                                        // silently depends on whether the wide fear ring is scanned.
+const float DRUNK_FEAR_STRENGTH = 0.4;  // peak fear radiated, on the same 0-1 scale where 1.0 is a
+                                        // point-blank bomb. Above ~0.31 a spooked neighbour lands
+                                        // inside FEAR_CONTAGION_WINDOW itself and relays the panic
+                                        // onward, so it ripples a hop or two past DRUNK_FEAR_RADIUS
+                                        // before the per-hop decay puts it outside that window;
+                                        // below ~0.31 the fear stops at the neighbours the drunk
+                                        // hog can reach directly.
+const float DRUNK_FEAR_FADE     = 15.0; // seconds of remaining drunkenness over which the radiated
+                                        // fear ramps down to nothing. Shorter than the 50s
+                                        // contagion_duration on DrunkProjectile.tres, so most of a
+                                        // drunk hog's life radiates full-strength fear and only the
+                                        // tail winds down.
+
 // Thresholds used when computing state bits — kept here so C# only needs to
 // read the pre-computed state, not re-derive it from raw values.
 const float DAMAGED_DISPLAY_DURATION = 1.6;  // seconds the DAMAGED bit stays set after a hit
@@ -732,6 +752,37 @@ void main() {
                             overlap_correction += (diff / dist) * (comb_radius - dist) * OVERLAP_CORRECTION_FACTOR;
                         }
 
+                        // ---- Drunk fear: a staggering hog unsettles the hogs right next to it ----
+                        // Pull-based, exactly like the bomb fear above: the frightened hog reads
+                        // the drunk one, so this needs no atomics and re-evaluates every frame the
+                        // two stay close. Inner ring only — DRUNK_FEAR_RADIUS sits inside the 3×3's
+                        // guaranteed coverage, so it does not depend on `ring`.
+                        //
+                        // The expiry is read before the state bits on purpose. It is false for every
+                        // uninfected hog, which is nearly all of them, so the common case costs one
+                        // coherent load of bodies[i] instead of two. The bits cannot do that gating
+                        // themselves: they are sticky past expiry by design (see the writeback
+                        // comment at the end of main), so a sober hog keeps its DRUNK bit.
+                        if (bomb_fear_duration > 0.0 && dist < DRUNK_FEAR_RADIUS) {
+                            uint n_expiry = bodies[i].contagion_expiry_u;
+                            if (n_expiry > now_u && (bodies[i].state & STATE_DRUNK) != 0u) {
+                                float n_remaining = float(n_expiry - now_u) / CONT_TIME_SCALE;
+                                // Falls off with both the neighbour's remaining drunkenness and the
+                                // gap between us — the second factor keeps the effect from having a
+                                // hard edge at DRUNK_FEAR_RADIUS.
+                                float n_fear = DRUNK_FEAR_STRENGTH
+                                             * clamp(n_remaining / DRUNK_FEAR_FADE, 0.0, 1.0)
+                                             * (1.0 - dist / DRUNK_FEAR_RADIUS);
+                                if (n_fear > best_contagion_fear) {
+                                    best_contagion_fear = n_fear;
+                                    // Flee the drunk hog itself rather than any bomb: this is the
+                                    // origin the panic steers away from, and it is re-read every
+                                    // frame, so hogs keep backing away as the drunk one staggers.
+                                    contagion_bomb_origin = n_position;
+                                }
+                            }
+                        }
+
                         // ---- Contagion spread: fire and poison propagate to nearby bodies ----
                         // Per-frame random seed mixes id, neighbour index and time so no
                         // two pairs (and no two frames) roll the same probability.
@@ -750,7 +801,10 @@ void main() {
             }
         }
 
-        // Apply contagion only if the spread fear is meaningfully stronger than our current fear
+        // Apply contagion only if the spread fear is meaningfully stronger than our current fear.
+        // best_contagion_fear is whichever source won above — a panicking neighbour relaying a bomb,
+        // or a drunk hog next to us — so the two share one back-calculated fear state and cannot
+        // stack. Strongest wins.
         if (best_contagion_fear > 0.0) {
             float self_fear   = fear_factor > 0.0 ? (1.0 - time_t) : 0.0;
             float spread_fear = best_contagion_fear * FEAR_CONTAGION_DECAY;
