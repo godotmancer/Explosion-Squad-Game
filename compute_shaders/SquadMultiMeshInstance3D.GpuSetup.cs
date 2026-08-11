@@ -41,7 +41,7 @@ public sealed partial class SquadMultiMeshInstance3D
       );
       if (SpawnPoint != null)
       {
-        position = new Vector2(SpawnPoint.Position.X, SpawnPoint.Position.Z);
+        position = new Vector2(SpawnPoint.GlobalPosition.X, SpawnPoint.GlobalPosition.Z);
       }
       bodiesData[i] = new GpuBody
       {
