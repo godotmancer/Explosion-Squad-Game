@@ -253,7 +253,7 @@ const float DRUNK_FEAR_STRENGTH = 0.4;  // peak fear radiated, on the same 0-1 s
                                         // before the per-hop decay puts it outside that window;
                                         // below ~0.31 the fear stops at the neighbours the drunk
                                         // hog can reach directly.
-const float DRUNK_FEAR_FADE     = 15.0; // seconds of remaining drunkenness over which the radiated
+const float DRUNK_FEAR_FADE     = 1.0; // seconds of remaining drunkenness over which the radiated
                                         // fear ramps down to nothing. Shorter than the 50s
                                         // contagion_duration on DrunkProjectile.tres, so most of a
                                         // drunk hog's life radiates full-strength fear and only the
