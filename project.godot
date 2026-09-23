@@ -23,6 +23,7 @@ boot_splash/minimum_display_time=1000
 [autoload]
 
 Global="*uid://cpoq8wb4kh463"
+_mcp_game_helper="*res://addons/godot_ai/runtime/game_helper.gd"
 
 [debug]
 
@@ -36,6 +37,7 @@ window/size/initial_position_type=4
 window/size/always_on_top=true
 window/hdr/request_hdr_output=true
 window/dpi/allow_hidpi=false
+window/vsync/vsync_mode=0
 
 [dotnet]
 
@@ -45,6 +47,10 @@ project/assembly_name="ExplosionSquadGame"
 
 naming/scene_name_casing=1
 naming/script_name_casing=1
+
+[editor_plugins]
+
+enabled=PackedStringArray("res://addons/godot_ai/plugin.cfg")
 
 [gui]
 
