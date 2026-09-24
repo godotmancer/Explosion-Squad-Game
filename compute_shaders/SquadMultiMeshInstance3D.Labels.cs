@@ -20,7 +20,10 @@ public sealed partial class SquadMultiMeshInstance3D
       var viewportRect = GetViewport().GetVisibleRect();
 
       _labelCandidates.Clear();
-      for (var i = 0; i < NumBodies; i++)
+      // The readback's count, not NumBodies: hogs spawned since the GPU tick it came from
+      // have no row in it yet.
+      var bodyCount = gpuFloats.Length / INSTANCE_STRIDE;
+      for (var i = 0; i < bodyCount; i++)
       {
         var o = i * INSTANCE_STRIDE;
         var stateBits = BitConverter.SingleToUInt32Bits(gpuFloats[o + INST_STATE]);

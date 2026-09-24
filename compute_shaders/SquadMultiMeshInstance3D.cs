@@ -147,10 +147,22 @@ public sealed partial class SquadMultiMeshInstance3D : MultiMeshInstance3D
     // multiply → integer multiplier; (Value-1) clones spawned per entering hog (permanent immunity per zone)
     // add      → integer count; that many hogs spawned at the zone centre per entry (permanent immunity per zone)
     public float Value;
-
-    // Hog indices that were inside this zone last frame (enter/exit detection).
-    public HashSet<int> Occupants = [];
   }
+
+  // One zone's footprint for one ProcessTriggerZones pass, resolved once per pass rather than
+  // once per hog. The Min/Max box is a cheap reject tested before the exact shape.
+  private struct TriggerBounds
+  {
+    public Vector2 Center;
+    public Vector2 HalfExt; // radius in X for a circle
+    public Vector2 Axis;
+    public bool IsCircle;
+    public float MinX, MaxX, MinZ, MaxZ;
+  }
+
+  // Occupancy is one bit per zone in a ulong per hog (_zoneMasks), so this is the most zones
+  // tested; any beyond it are ignored, with a warning.
+  private const int MAX_TRIGGER_ZONES = 64;
 
   [Signal]
   public delegate void HogStateChangedEventHandler(int index, int newState, Vector3 worldPos);
@@ -513,8 +525,19 @@ public sealed partial class SquadMultiMeshInstance3D : MultiMeshInstance3D
   // Dead hog entries linger harmlessly (indices are never recycled).
   private readonly HashSet<long> _triggeredPairs = [];
 
-  // Scratch set reused for per-zone occupant tracking (zero per-frame allocation).
-  private HashSet<int> _zoneOccupantsScratch = [];
+  // Per body, bit z is set if the hog was inside trigger zone z on the last pass: an enter is
+  // `inside & ~_zoneMasks[i]`. Replaces a HashSet of occupants per zone, which cost a hash
+  // lookup per hog per zone and a full pass over the readback per zone — ~10 ms a tick at
+  // 100k hogs with four zones. Sized to _bodyCapacity like _hogStates, grown in SpawnHogs.
+  private ulong[] _zoneMasks;
+
+  // The zone list _zoneMasks was built against. A rescan (InvalidateObstacleCache) makes a
+  // new list whose indices may mean other zones, so the masks are cleared when it changes —
+  // every hog inside a zone then enters it afresh, as it did when each zone kept its own set.
+  private List<TriggerZone> _zoneMasksZones;
+
+  // Per-pass zone footprints, indexed like the zone list.
+  private readonly TriggerBounds[] _triggerBounds = new TriggerBounds[MAX_TRIGGER_ZONES];
 
   // Trigger-zone damage summed per hog over one ProcessTriggerZones pass, then written once
   // per hog by FlushZoneDamage. damage_accum is a plain GPU word that a CPU write replaces,
@@ -526,6 +549,16 @@ public sealed partial class SquadMultiMeshInstance3D : MultiMeshInstance3D
   private Dictionary<CollisionShape3D, (Vector2 center, float yRot)> _prevObstacleState = [];
   private Dictionary<CollisionShape3D, (Vector2 center, float yRot)> _currentObstacleState = [];
   private RandomNumberGenerator _rndGen = new();
+
+  // The GPU runs a tick behind: _PhysicsProcess submits its dispatch without syncing, and the
+  // next _PhysicsProcess syncs it in CompleteGpuTick. _gpuTickBodies is NumBodies as that
+  // dispatch saw it — the rows the readback may cover, however many hogs spawned since.
+  private bool _gpuTickInFlight;
+  private int _gpuTickBodies;
+
+  // Hogs in _transformFloats after the last compaction, i.e. what the MultiMesh is drawing.
+  // ApplyPhysicsGrowth re-uploads them after resizing the MultiMesh.
+  private int _visibleHogCount;
 
   // Per-body state tracking (allocated to _bodyCapacity, grown in SpawnHogs)
   private byte[] _hogStates; // current HogBehaviourState per body
@@ -681,6 +714,14 @@ public sealed partial class SquadMultiMeshInstance3D : MultiMeshInstance3D
     var fdelta = (float)delta;
     _time += fdelta;
 
+    // The GPU runs one tick behind the CPU: last tick's dispatch was submitted without waiting
+    // for it, and ran while the rest of that frame was processed and drawn. Collect it now —
+    // before anything below reads a GPU buffer or queues writes for this tick.
+    if (_gpuTickInFlight)
+    {
+      CompleteGpuTick(delta);
+    }
+
     // Stage GPU buffer contents. These only queue work now; nothing touches the
     // RenderingDevice until FlushGpuCommands below, which also handles any buffer growth
     // and the uniform-set rebuilds that growth implies.
@@ -708,8 +749,8 @@ public sealed partial class SquadMultiMeshInstance3D : MultiMeshInstance3D
 
     // -------------------------------------------------------------------------
     // Hash build → projectile → physics, chained in one command list with a
-    // single Submit+Sync per frame.  Physics writes the instance buffer from its
-    // own tail, so there is no separate transform pass and no second sync point.
+    // single Submit per tick, synced at the start of the next.  Physics writes the
+    // instance buffer from its own tail, so there is no separate transform pass.
     //
     // The build shader uses a 16-bit frame stamp (high half of each hash_counts[]
     // word) to lazily reset stale buckets, eliminating the need for a separate
@@ -726,11 +767,12 @@ public sealed partial class SquadMultiMeshInstance3D : MultiMeshInstance3D
 
     // Apply every queued buffer mutation. This is the ONE place GPU buffers are written,
     // and it must stay immediately before the dispatch: commands queued anywhere earlier
-    // (including from _Process and from last frame's trigger-zone pass) land here, in FIFO
-    // order, so the shaders below see exactly the state they saw before the queue existed.
+    // (including from _Process and from the trigger-zone pass in CompleteGpuTick above) land
+    // here, in FIFO order, so the shaders below see exactly the state they saw before the
+    // queue existed.
     FlushGpuCommands();
 
-    // All GPU passes in a single command list — one Submit+Sync per frame.
+    // All GPU passes in a single command list — one Submit per tick.
     var cl = _rd.ComputeListBegin();
 
     // --- Hash build ---
@@ -755,14 +797,32 @@ public sealed partial class SquadMultiMeshInstance3D : MultiMeshInstance3D
     _rd.ComputeListDispatch(cl, workGroups, 1, 1);
 
     // No trailing barrier: physics is the last pass in the list, so there is no
-    // subsequent dispatch to make its writes visible to. The CPU readback below is
-    // ordered by Submit()+Sync() and BufferGetData's own transfer synchronisation.
+    // subsequent dispatch to make its writes visible to. The CPU readback in
+    // CompleteGpuTick is ordered by Submit()+Sync() and BufferGetData's own transfer
+    // synchronisation.
     _rd.ComputeListEnd();
     _rd.Submit();
+
+    // Don't wait. Sync used to follow here, so the CPU sat idle for the whole dispatch — 4–10 ms
+    // a tick at 100k hogs. The next tick syncs instead, by which time the GPU has had the rest
+    // of this frame to finish. The cost is one tick of latency on everything read back.
+    _gpuTickInFlight = true;
+    _gpuTickBodies = NumBodies;
+  }
+
+  /// <summary>
+  /// Waits for the tick submitted by the previous <see cref="_PhysicsProcess"/> and consumes
+  /// its results: the hash stamp, the transform readback, deaths, labels, trigger zones and the
+  /// MultiMesh upload. Anything it queues (zone damage, stamp-wrap clears) is flushed before the
+  /// next dispatch, just as when this ran straight after that tick's own Sync.
+  /// </summary>
+  private void CompleteGpuTick(double delta)
+  {
     _rd.Sync();
+    _gpuTickInFlight = false;
 
     // Advance the hash frame stamp after GPU work is complete, so all three shaders saw the
-    // same value this frame.
+    // same value that tick.
     _hashFrameStamp = (_hashFrameStamp + 1) & HASH_STAMP_MASK;
     if (_hashFrameStamp == 0)
     {
@@ -781,13 +841,13 @@ public sealed partial class SquadMultiMeshInstance3D : MultiMeshInstance3D
     // --- Readback: BufferGetData allocates the returned array (Godot API limitation),
     // but everything downstream reads it in place via Span<float> — no further copies.
     //
-    // Only the live prefix is transferred. The buffer is sized to _bodyCapacity, but every
-    // consumer below (the compaction loop, UpdateLabels, ProcessTriggerZones) indexes by body
-    // id and stops at NumBodies, so the slack slots were being copied and allocated for
-    // nothing. ---
-    var readbackBytes = (uint)(NumBodies * INSTANCE_STRIDE * sizeof(float));
+    // Only the live prefix is transferred, and only the bodies that tick dispatched: hogs
+    // spawned since (from _Process, or by last tick's trigger zones) have no instance row yet,
+    // and a capacity growth they queued has not been applied, so the buffer may not even be
+    // large enough for NumBodies. Every consumer below takes its count from the span. ---
+    var readbackBytes = (uint)(_gpuTickBodies * INSTANCE_STRIDE * sizeof(float));
     var outputBytes = _rd.BufferGetData(_transformBuffer, 0, readbackBytes);
-    var gpuFloats = MemoryMarshal.Cast<byte, float>(outputBytes.AsSpan());
+    ReadOnlySpan<float> gpuFloats = MemoryMarshal.Cast<byte, float>(outputBytes.AsSpan());
 
     if (_showStateLabels)
     {
@@ -811,7 +871,7 @@ public sealed partial class SquadMultiMeshInstance3D : MultiMeshInstance3D
     // regardless of whether labels are shown, so OnHogDied always fires.
     var aliveCount = 0;
     var dst = _transformFloats.AsSpan();
-    for (var i = 0; i < NumBodies; i++)
+    for (var i = 0; i < _gpuTickBodies; i++)
     {
       var src = i * INSTANCE_STRIDE;
       var stateBits = BitConverter.SingleToUInt32Bits(gpuFloats[src + INST_STATE]);
@@ -830,6 +890,8 @@ public sealed partial class SquadMultiMeshInstance3D : MultiMeshInstance3D
         .CopyTo(dst.Slice(aliveCount * INSTANCE_STRIDE, INSTANCE_STRIDE));
       aliveCount++;
     }
+
+    _visibleHogCount = aliveCount;
 
     if (_triggerZones is { Count: > 0 })
     {
@@ -899,6 +961,7 @@ public sealed partial class SquadMultiMeshInstance3D : MultiMeshInstance3D
       EnqueueGrowPhysics(newCapacity, (int)writeOffset);
       _bodyCapacity = newCapacity;
       Array.Resize(ref _hogStates, newCapacity);
+      Array.Resize(ref _zoneMasks, newCapacity);
     }
 
     EnqueueGpuWrite(GpuTarget.Physics, writeOffset, newBytes);

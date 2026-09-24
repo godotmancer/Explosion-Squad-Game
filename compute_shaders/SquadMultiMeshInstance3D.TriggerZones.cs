@@ -10,9 +10,10 @@ public sealed partial class SquadMultiMeshInstance3D
   /// <summary>
   /// Called after the GPU sync + compaction loop each physics frame.
   /// Tests every alive hog against each trigger zone using transform-buffer
-  /// positions we already have in <paramref name="gpuFloats"/>.
+  /// positions we already have in <paramref name="gpuFloats"/>, in one pass over the hogs.
   ///
-  /// Effects fire only on the enter transition (first frame inside).
+  /// Effects fire only on the enter transition (first frame inside), found by comparing the
+  /// hog's zones this pass with <see cref="_zoneMasks"/> from the last.
   /// Multiply and Add additionally use <see cref="_triggeredPairs"/> as a
   /// one-shot skip: clones spawned inside a thick zone are marked so the enter
   /// event they are born into is swallowed (the mark is consumed by that enter).
@@ -22,7 +23,7 @@ public sealed partial class SquadMultiMeshInstance3D
   /// </summary>
   private void ProcessTriggerZones(ReadOnlySpan<float> gpuFloats)
   {
-    // Snapshot both lists at entry. _triggerZones can be nulled mid-frame by
+    // Snapshot the list at entry. _triggerZones can be nulled mid-frame by
     // InvalidateObstacleCache (e.g. if an obstacle visibility change fires during
     // signal emission), so we capture a local reference and bail if it's gone.
     var zones = _triggerZones;
@@ -31,33 +32,53 @@ public sealed partial class SquadMultiMeshInstance3D
       return;
     }
 
-    // Snapshot NumBodies: SpawnHogs below grows it, but we only test the
-    // bodies that existed at the start of this frame.
-    var bodyCount = NumBodies;
-    _pendingTriggerSpawns.Clear();
-
-    for (var zoneIdx = 0; zoneIdx < zones.Count; zoneIdx++)
+    if (!ReferenceEquals(zones, _zoneMasksZones))
     {
-      var zone = zones[zoneIdx];
+      Array.Clear(_zoneMasks);
+      _zoneMasksZones = zones;
+      if (zones.Count > MAX_TRIGGER_ZONES)
+      {
+        GD.PushWarning(
+          $"{zones.Count} trigger zones; only the first {MAX_TRIGGER_ZONES} are tested."
+        );
+      }
+    }
+
+    // Resolve each zone's footprint once. A zone that is disabled or hidden this pass is left
+    // out of activeMask, and its bits carry over unchanged: it neither fires nor forgets who
+    // was inside, so re-enabling it does not re-trigger hogs that never left.
+    var zoneCount = Math.Min(zones.Count, MAX_TRIGGER_ZONES);
+    var activeMask = 0UL;
+    for (var zoneIdx = 0; zoneIdx < zoneCount; zoneIdx++)
+    {
+      var shape = zones[zoneIdx].Shape;
       if (
-        !IsInstanceValid(zone.Shape)
-        || zone.Shape.Shape == null
-        || zone.Shape.Disabled
-        || !zone.Shape.IsVisibleInTree()
+        !IsInstanceValid(shape)
+        || shape.Shape == null
+        || shape.Disabled
+        || !shape.IsVisibleInTree()
       )
       {
         continue;
       }
 
-      var (center, halfExt, axis, isCircle) = GetTriggerBounds(zone.Shape);
+      _triggerBounds[zoneIdx] = GetTriggerBounds(shape);
+      activeMask |= 1UL << zoneIdx;
+    }
 
-      // Reuse the scratch set for this frame's occupants; the zone's previous
-      // set becomes next zone's scratch after the swap below (zero alloc).
-      var prevOccupants = zone.Occupants;
-      var currOccupants = _zoneOccupantsScratch;
-      currOccupants.Clear();
+    // The bodies in this readback — not NumBodies, which counts hogs spawned since the GPU tick
+    // it came from (they have no row in it yet), and which SpawnHogs below grows further.
+    var bodyCount = gpuFloats.Length / INSTANCE_STRIDE;
+    _pendingTriggerSpawns.Clear();
 
-      for (var i = 0; i < bodyCount; i++)
+    if (activeMask != 0)
+    {
+      // Locals rather than fields: the call in the loop would otherwise make the JIT reload
+      // both arrays, and bounds-check them, on every hog.
+      var maskArray = _zoneMasks;
+      var masks = maskArray.AsSpan(0, bodyCount);
+      ReadOnlySpan<TriggerBounds> bounds = _triggerBounds.AsSpan(0, zoneCount);
+      for (var i = 0; i < masks.Length; i++)
       {
         var src = i * INSTANCE_STRIDE;
         var stateBits = BitConverter.SingleToUInt32Bits(gpuFloats[src + INST_STATE]);
@@ -67,85 +88,51 @@ public sealed partial class SquadMultiMeshInstance3D
         }
 
         var hogXZ = new Vector2(gpuFloats[src + INST_ORIGIN_X], gpuFloats[src + INST_ORIGIN_Z]);
-        var inside = isCircle
-          ? IsInsideCircle(hogXZ, center, halfExt.X)
-          : IsInsideOBB(hogXZ, center, halfExt, axis);
+        var prev = masks[i];
+        var inside = prev & ~activeMask;
+        var pending = activeMask;
+        while (pending != 0)
+        {
+          var zoneIdx = System.Numerics.BitOperations.TrailingZeroCount(pending);
+          pending &= pending - 1;
+          ref readonly var b = ref bounds[zoneIdx];
+          if (hogXZ.X < b.MinX || hogXZ.X > b.MaxX || hogXZ.Y < b.MinZ || hogXZ.Y > b.MaxZ)
+          {
+            continue;
+          }
 
-        if (!inside)
+          if (
+            b.IsCircle
+              ? IsInsideCircle(hogXZ, b.Center, b.HalfExt.X)
+              : IsInsideOBB(hogXZ, b.Center, b.HalfExt, b.Axis)
+          )
+          {
+            inside |= 1UL << zoneIdx;
+          }
+        }
+
+        masks[i] = inside;
+        var entered = inside & ~prev;
+        if (entered == 0)
         {
           continue;
         }
 
-        currOccupants.Add(i);
-
-        if (prevOccupants.Contains(i))
+        do
         {
-          continue; // already inside last frame — don't re-trigger
-        }
+          var zoneIdx = System.Numerics.BitOperations.TrailingZeroCount(entered);
+          entered &= entered - 1;
+          OnZoneEntered(i, zoneIdx, zones[zoneIdx], hogXZ);
+        } while (entered != 0);
 
-        // --- Enter event ---
-        var hogPos = new Vector3(
-          gpuFloats[src + INST_ORIGIN_X],
-          YOffset,
-          gpuFloats[src + INST_ORIGIN_Z]
-        );
-
-        var emitSignal = false;
-
-        switch (zone.Effect)
+        // A HogZoneTriggered handler that spawned hogs could have grown _zoneMasks into a new
+        // array (the resize copies what was written so far); keep writing to the live one.
+        if (!ReferenceEquals(maskArray, _zoneMasks))
         {
-          case TriggerEffect.Damage:
-            // Damage re-fires on every re-entry; no permanent immunity needed.
-            QueueZoneDamage(i, zone.Value);
-            emitSignal = true;
-            break;
-
-          case TriggerEffect.Multiply:
-            // One-shot skip mark (consumed here): swallows the enter event a
-            // clone is born into; a later genuine re-entry triggers normally.
-            if (_triggeredPairs.Remove(TriggerKey(i, zoneIdx)))
-            {
-              break;
-            }
-
-            var cloneCount = Math.Max(0, (int)zone.Value - 1);
-            if (cloneCount > 0)
-            {
-              _pendingTriggerSpawns.Add((zoneIdx, hogPos, cloneCount));
-            }
-
-            emitSignal = true;
-            break;
-
-          case TriggerEffect.Add:
-            // One-shot skip mark (consumed here): swallows the enter event a
-            // spawned hog is born into; a later re-entry triggers normally.
-            if (_triggeredPairs.Remove(TriggerKey(i, zoneIdx)))
-            {
-              break;
-            }
-
-            var addCount = (int)zone.Value;
-            if (addCount > 0)
-            {
-              _pendingTriggerSpawns.Add(
-                (zoneIdx, zone.Shape.GlobalPosition with { Y = YOffset }, addCount)
-              );
-            }
-            emitSignal = true;
-            break;
-          default:
-            break;
-        }
-
-        if (ShowHogs && emitSignal)
-        {
-          EmitSignal(SignalName.HogZoneTriggered, i, hogPos, zone.Shape, (int)zone.Effect);
+          maskArray = _zoneMasks;
+          masks = maskArray.AsSpan(0, bodyCount);
         }
       }
-
-      zone.Occupants = currOccupants;
-      _zoneOccupantsScratch = prevOccupants;
     }
 
     FlushZoneDamage();
@@ -176,6 +163,65 @@ public sealed partial class SquadMultiMeshInstance3D
       {
         _triggeredPairs.Add(TriggerKey(ni, zoneIdx));
       }
+    }
+  }
+
+  /// <summary>Applies <paramref name="zone"/>'s effect to hog <paramref name="i"/>, which has
+  /// just entered it.</summary>
+  private void OnZoneEntered(int i, int zoneIdx, TriggerZone zone, Vector2 hogXZ)
+  {
+    var hogPos = new Vector3(hogXZ.X, YOffset, hogXZ.Y);
+    var emitSignal = false;
+
+    switch (zone.Effect)
+    {
+      case TriggerEffect.Damage:
+        // Damage re-fires on every re-entry; no permanent immunity needed.
+        QueueZoneDamage(i, zone.Value);
+        emitSignal = true;
+        break;
+
+      case TriggerEffect.Multiply:
+        // One-shot skip mark (consumed here): swallows the enter event a
+        // clone is born into; a later genuine re-entry triggers normally.
+        if (_triggeredPairs.Remove(TriggerKey(i, zoneIdx)))
+        {
+          break;
+        }
+
+        var cloneCount = Math.Max(0, (int)zone.Value - 1);
+        if (cloneCount > 0)
+        {
+          _pendingTriggerSpawns.Add((zoneIdx, hogPos, cloneCount));
+        }
+
+        emitSignal = true;
+        break;
+
+      case TriggerEffect.Add:
+        // One-shot skip mark (consumed here): swallows the enter event a
+        // spawned hog is born into; a later re-entry triggers normally.
+        if (_triggeredPairs.Remove(TriggerKey(i, zoneIdx)))
+        {
+          break;
+        }
+
+        var addCount = (int)zone.Value;
+        if (addCount > 0)
+        {
+          _pendingTriggerSpawns.Add(
+            (zoneIdx, zone.Shape.GlobalPosition with { Y = YOffset }, addCount)
+          );
+        }
+        emitSignal = true;
+        break;
+      default:
+        break;
+    }
+
+    if (ShowHogs && emitSignal)
+    {
+      EmitSignal(SignalName.HogZoneTriggered, i, hogPos, zone.Shape, (int)zone.Effect);
     }
   }
 
@@ -228,26 +274,45 @@ public sealed partial class SquadMultiMeshInstance3D
   private static long TriggerKey(int hogIndex, int zoneIndex) =>
     ((long)zoneIndex << 32) | (uint)hogIndex;
 
-  private static (Vector2 center, Vector2 halfExt, Vector2 axis, bool isCircle) GetTriggerBounds(
-    CollisionShape3D cs
-  )
+  private static TriggerBounds GetTriggerBounds(CollisionShape3D cs)
   {
     var xform = cs.GlobalTransform;
     var center = new Vector2(xform.Origin.X, xform.Origin.Z);
     var yRot = xform.Basis.GetEuler().Y;
     var axis = new Vector2(Mathf.Cos(yRot), -Mathf.Sin(yRot));
 
-    return cs.Shape switch
+    var (halfExt, isCircle) = cs.Shape switch
     {
-      SphereShape3D s => (center, new Vector2(s.Radius, s.Radius), axis, true),
-      CylinderShape3D c => (center, new Vector2(c.Radius, c.Radius), axis, true),
-      BoxShape3D b => (center, new Vector2(b.Size.X * 0.5f, b.Size.Z * 0.5f), axis, false),
-      _ => (center, Vector2.Zero, axis, false),
+      SphereShape3D s => (new Vector2(s.Radius, s.Radius), true),
+      CylinderShape3D c => (new Vector2(c.Radius, c.Radius), true),
+      BoxShape3D b => (new Vector2(b.Size.X * 0.5f, b.Size.Z * 0.5f), false),
+      _ => (Vector2.Zero, false),
+    };
+
+    // World-aligned box around the shape: the radius for a circle, the rotated half extents
+    // (projected onto X and Z) for an OBB.
+    var reach = isCircle
+      ? halfExt
+      : new Vector2(
+        (Mathf.Abs(axis.X) * halfExt.X) + (Mathf.Abs(axis.Y) * halfExt.Y),
+        (Mathf.Abs(axis.Y) * halfExt.X) + (Mathf.Abs(axis.X) * halfExt.Y)
+      );
+
+    return new TriggerBounds
+    {
+      Center = center,
+      HalfExt = halfExt,
+      Axis = axis,
+      IsCircle = isCircle,
+      MinX = center.X - reach.X,
+      MaxX = center.X + reach.X,
+      MinZ = center.Y - reach.Y,
+      MaxZ = center.Y + reach.Y,
     };
   }
 
   private static bool IsInsideCircle(Vector2 point, Vector2 center, float radius) =>
-    point.DistanceTo(center) <= radius;
+    point.DistanceSquaredTo(center) <= radius * radius;
 
   private static bool IsInsideOBB(Vector2 point, Vector2 center, Vector2 halfExt, Vector2 axis)
   {

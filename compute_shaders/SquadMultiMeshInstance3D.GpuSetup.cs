@@ -49,6 +49,7 @@ public sealed partial class SquadMultiMeshInstance3D
     var bodiesData = new GpuBody[_bodyCapacity];
 
     _hogStates = new byte[_bodyCapacity];
+    _zoneMasks = new ulong[_bodyCapacity];
 
     for (var i = 0; i < NumBodies; i++)
     {
@@ -220,6 +221,14 @@ public sealed partial class SquadMultiMeshInstance3D
   {
     if (_rd != null)
     {
+      // A tick may still be running on the GPU (it is only synced by the next tick); let it
+      // finish before freeing what it uses.
+      if (_gpuTickInFlight)
+      {
+        _rd.Sync();
+        _gpuTickInFlight = false;
+      }
+
       // Free order: pipelines + uniform sets first, then the buffers and
       // shaders they reference.
       Rid[] rids =

@@ -27,10 +27,11 @@ to watch out for* when making changes. Read both before touching anything.
 
 ## 1. One-Paragraph Mental Model
 
-Explosion Squad game simulates up to 20 000 hogs entirely on the GPU. Every physics frame the
-CPU drains its deferred GPU command queue, dispatches three compute shaders
-(hash → projectile → physics) in one command list, calls `Submit()` + `Sync()`, and reads the
-resulting transform buffer back to update the MultiMesh in one RenderingServer call.
+Explosion Squad game simulates up to ~125 000 hogs entirely on the GPU. Every physics frame the
+CPU first syncs the dispatch it submitted last frame and reads its transform buffer back to update
+the MultiMesh in one RenderingServer call, then drains its deferred GPU command queue, dispatches
+three compute shaders (hash → projectile → physics) in one command list and calls `Submit()` —
+without waiting. The GPU runs one tick behind the CPU.
 The CPU never writes individual hog positions; it only reads them to detect deaths and
 trigger zones.
 GDScript handles everything visible (projectile meshes, FX, labels, UI, camera);
@@ -65,6 +66,10 @@ glslangValidator --target-env vulkan1.1 -S comp /tmp/p.comp
 
 `dotnet build` must report **0 warnings, 0 errors** before any task is considered
 done. The project uses the `godotx` CLI wrapper.
+
+`ExplosionSquadGame.csproj` sets `<Optimize>true</Optimize>` for every configuration. The editor
+runs the Debug configuration, for which the Godot SDK otherwise disables JIT optimisation, and the
+per-hog C# loops ran ~2× slower that way. Breakpoints still work; stepping is less exact.
 
 Notes on the validator invocation: `--target-env vulkan1.1` is required or `push_constant`
 is rejected. Use `grep -v` rather than `sed '1d'` to strip the `#[compute]` line — several
@@ -133,6 +138,15 @@ One physics frame, in order:
 ```
 CPU                                 GPU
  │                                   │
+ ├─ CompleteGpuTick()                │  ← LAST tick's dispatch, submitted unsynced
+ │   ├─ Sync()                       │
+ │   ├─ advance hash frame stamp     │
+ │   ├─ BufferGetData(transformBuffer)  ← only CPU read per frame (the rows it dispatched)
+ │   ├─ Compact alive instances      │
+ │   ├─ ProcessTriggerZones          │  (CPU-side shape tests on transform data)
+ │   └─ MultimeshSetBuffer           │  ← only RenderingServer write per frame
+ │                                   │
+ ├─ UpdateProjectileLifetimes etc.   │  (may read GPU buffers: after the Sync above)
  ├─ WritePhysicsPush                 │
  ├─ WriteHashBuildPush               │
  ├─ WriteProjectilePush              │
@@ -149,13 +163,16 @@ CPU                                 GPU
  │                                   │  impulses, contagion spread, THEN writes
  │                                   │  instance_buffer[] from its own tail
  ├─ ComputeListEnd()                 │
- ├─ Submit() + Sync()                │
- │                                   │
- ├─ BufferGetData(transformBuffer)   │  ← only CPU read per frame (live prefix only)
- ├─ Compact alive instances          │
- ├─ ProcessTriggerZones              │  (CPU-side shape tests on transform data)
- └─ MultimeshSetBuffer               │  ← only RenderingServer write per frame
+ └─ Submit()                         │  ← no Sync: runs while the frame is processed + drawn
 ```
+
+**The GPU runs one tick behind.** `_PhysicsProcess` submits its dispatch and returns; the next
+`_PhysicsProcess` syncs it (`CompleteGpuTick`) before doing anything else. Syncing straight after
+`Submit` left the CPU idle for the whole dispatch — 4–10 ms a tick at 100k hogs. Everything read
+back (hog positions, deaths, trigger-zone enters, projectile hits) is therefore one tick older
+than it used to be; writes still land before the next dispatch exactly as before, because the
+trigger-zone pass and the flush both run between one dispatch's Sync and the next dispatch.
+See the §14 gotcha for what this means for new code.
 
 **Critical ordering constraint:** hash build → projectile → physics.
 The projectile shader atomically writes `damage_accum` into `bodies[]` which the
@@ -205,13 +222,13 @@ mechanism — it preserves the public API and requires no scene-file changes.
 
 | File | What lives there |
 |------|-----------------|
-| `SquadMultiMeshInstance3D.cs` | All `[Export]` properties, all inner types (`GpuBody`, `BombState`, `ProjectileAbility`, enums), all `[Signal]` declarations, all private field declarations, all buffer-layout constants, lifecycle (`_Ready` / `_Process` / `_PhysicsProcess` / `_UnhandledInput`), `SpawnHogs`, `UpdateTargetFromMouse` |
+| `SquadMultiMeshInstance3D.cs` | All `[Export]` properties, all inner types (`GpuBody`, `BombState`, `ProjectileAbility`, enums), all `[Signal]` declarations, all private field declarations, all buffer-layout constants, lifecycle (`_Ready` / `_Process` / `_PhysicsProcess` + `CompleteGpuTick` / `_UnhandledInput`), `SpawnHogs`, `UpdateTargetFromMouse` |
 | `GpuSetup.cs` | `SetupCompute`, `SetupMultiMesh`, `Dispose`, `WriteXxxPush`, `RebuildXxxUniformSet`, `VerifyPipeline`, `SampleHashOverflow` |
 | `GpuQueue.cs` | `GpuTarget` / `GpuCommandKind` enums, `GpuCommand` struct, `_gpuCommands` / `_gpuPayload` / `_gpuScratch`, `EnqueueGpuWrite`, `EnqueueGpuClear`, `EnqueueGrowPhysics`, `EnqueueGrowObstacles`, `FlushGpuCommands`, `ResolveGpuTarget`, `ApplyPhysicsGrowth`, `ApplyObstacleGrowth`, `FreeGpuRid`. **The only file allowed to call `RenderingDevice` mutators.** |
 | `Obstacles.cs` | Obstacle cache, `ExtractObstacles`, `EmitObstacleDataArray/List`, `WriteObstacle`, `ComputeMinObb`, `DecomposeTrimeshFootprint`, `ObstacleSlotCount`, `FindCollisionShapes`, `UpdateObstacleBuffer` |
 | `Projectiles.cs` | `SpawnProjectile`, `UploadPendingProjectiles`, `UpdateProjectileLifetimes`, `RegisterProjectileHitCallback`, `WriteProjectilePush` |
 | `Bombs.cs` | `DrainDeathFxQueue`, `OnDeathFxFinished`, `OnHogDied`, `DropBomb`, `UpdateBombBuffer` |
-| `TriggerZones.cs` | `ProcessTriggerZones`, `QueueZoneDamage`, `FlushZoneDamage`, `DamageHogViaBuffer`, `ScanForTriggers`, `GetTriggerBounds`, `IsInsideCircle/OBB`, `TriggerKey` |
+| `TriggerZones.cs` | `ProcessTriggerZones`, `OnZoneEntered`, `QueueZoneDamage`, `FlushZoneDamage`, `DamageHogViaBuffer`, `ScanForTriggers`, `GetTriggerBounds`, `IsInsideCircle/OBB`, `TriggerKey` |
 | `Labels.cs` | `_timeSinceLastLabelUpdate` field, `UpdateLabels`, `ClassifyState`, `IsLabelOnScreen` |
 
 **Rule:** all field *declarations* stay in the main `.cs` file, with two deliberate
@@ -679,10 +696,11 @@ Mutating a shared resource directly changes it for every future spawn.
 
 ### Deferred GPU writes
 
-`_rd.BufferUpdate()` inside `_PhysicsProcess` is deferred to the GPU command queue —
-it does not take effect until `Submit()`. Calling it *after* `Sync()` in the same
-frame means the next frame sees the update. This is the expected pattern for
-`DamageHogViaBuffer` and projectile reclaim writes.
+GPU writes are queued (`EnqueueGpuWrite`) and applied by `FlushGpuCommands` just before the
+next dispatch. Writes queued in `CompleteGpuTick` (trigger-zone damage) or in the staging calls
+after it (projectile reclaim) therefore reach the dispatch submitted later in the same
+`_PhysicsProcess`. This is the expected pattern for `DamageHogViaBuffer` and projectile reclaim
+writes.
 
 A write *replaces* the bytes it covers; the queue does not merge two writes to the same word.
 `DamageHogViaBuffer` relies on physics zeroing `damage_accum` every frame, so it must run at
@@ -720,8 +738,11 @@ These are non-negotiable. Do not introduce patterns that violate them.
 2. **No `get_nodes_in_group` or `get_children` in `_PhysicsProcess` or
    `_physics_process`.** Cache node references at `_ready` time.
 
-3. **One GPU submit per physics frame.** All three dispatches must be in a single
-   `ComputeListBegin → End → Submit → Sync` sequence.
+3. **One GPU submit per physics frame, synced at the start of the next.** All three dispatches
+   are in a single `ComputeListBegin → End → Submit`; its `Sync` is the first thing the next
+   `_PhysicsProcess` does (`CompleteGpuTick`). A local RenderingDevice must be synced before
+   anything else is recorded or read, so never submit twice, and never touch `_rd` between the
+   `Submit` and that `Sync`.
 
 4. **No additional `BufferGetData` calls beyond the existing transform readback, the
    throttled projectile flag readback, and the 1 Hz hash-overflow sample (which only runs
@@ -731,8 +752,9 @@ These are non-negotiable. Do not introduce patterns that violate them.
    `_rd.BufferUpdate`, `_rd.BufferCopy` or `_rd.BufferClear` outside `GpuQueue.cs`. See §5.
 
 4b. **Read back only the live prefix.** The transform readback is
-   `NumBodies * INSTANCE_STRIDE * sizeof(float)`, not the full `_bodyCapacity`. Every consumer
-   indexes by body id and stops at `NumBodies`, so copying the slack was pure waste.
+   `_gpuTickBodies * INSTANCE_STRIDE * sizeof(float)` — the bodies that dispatch covered — not
+   the full `_bodyCapacity`. Every consumer takes its count from the span it is handed, so copying
+   the slack was pure waste.
    `BODY_CAPACITY_GROWTH` is 1.25 with a `BODY_CAPACITY_MIN_STEP` of 256 — the old 2× doubling
    left up to half the buffer unused. Note the tension: growth is amortised O(1) at 2× and
    worse at 1.25×, which is acceptable here only because growth is rare and the per-frame
@@ -792,6 +814,26 @@ Specifics worth not re-deriving:
   guessing.
 - ~0.5% of hogs end up inside an obstacle at `PBD_ITERATIONS = 1` in a dense crowd. Pre-existing
   solver behaviour, verified identical with and without the broad-phase.
+
+**Crowd size.** With the box mesh `Main.tscn` now ships, hogs scattered over the map, M4 Pro:
+20k 116 fps, 50k 106 fps, 75k 78 fps, 100k 39 fps (94 fps hidden), 125k 16 fps (64 fps hidden,
+simulation still real time), 150k 6 fps. Before the pipelining and the optimised build, 100k was
+20 fps: pipelining alone took it to 24, the optimised build to 39. With a synced tick, 100k cost
+roughly: GPU dispatch + `Sync` 4–10 ms (grows with crowd density), `BufferGetData` ~1.1 ms,
+compaction ~1 ms (unoptimised), trigger zones ~3 ms (unoptimised; plus 1–3 ms of `HogZoneTriggered`
+handlers while hogs are shown), `MultimeshSetBuffer` ~1.1 ms. Pipelining won less than the idle
+`Sync` suggested, presumably because compute and rendering share the one GPU.
+
+- **The cliff is the physics catch-up, not linear cost.** Physics is fixed at 60 Hz; once a tick
+  plus the frame's drawing exceeds 16.7 ms, Godot runs extra ticks per frame (up to
+  `max_physics_steps_per_frame`, 8), and every tick here is a full dispatch + `Sync`. Before the
+  trigger-zone rewrite (§14) a 100k tick was ~17.6 ms on its own, so every frame ran 8 ticks (6 fps).
+  Capping the steps at 2 gives smoother frames but slows the simulation below real time.
+- **Optimised vs unoptimised C#.** The csproj optimises every configuration (§2). To compare
+  against unoptimised code, `dotnet build -p:Optimize=false --no-incremental` — without
+  `--no-incremental` MSBuild skips the recompile and the flag silently does nothing.
+- **`BufferGetData` allocates the whole readback every tick** (8 MB at 100k), a large-object
+  allocation that triggers a gen-2 GC roughly every third tick. Not yet avoided.
 
 ---
 
@@ -912,12 +954,24 @@ Growth itself now runs inside the command queue (`ApplyPhysicsGrowth` in `GpuQue
 preserves existing contents with a GPU-side `_rd.BufferCopy`, not a readback-and-merge on the
 CPU. `SpawnHogs` enqueues `EnqueueGrowPhysics`; it does not resize anything directly.
 
-### `currOccupants` in ProcessTriggerZones allocates
+### Trigger zones are one pass with a bitmask per hog — keep them that way
 
-`ProcessTriggerZones` creates a `new HashSet<int>()` per zone per frame. This is a
-known allocation site that was judged acceptable (trigger zones are few). If the
-number of trigger zones grows large, convert to a pre-allocated swap pattern like
-the label sets.
+`ProcessTriggerZones` walks the readback once, testing each hog against every zone (a world-aligned
+box reject from `GetTriggerBounds`, then the exact circle / OBB). Occupancy is a `ulong` per hog in
+`_zoneMasks`, bit *z* for zone *z*, so an enter is `inside & ~previous`. It used to keep a
+`HashSet<int>` of occupants per zone and walk every hog once per zone: at 100k hogs and four zones
+that was ~10 ms of every tick, half the tick, and the reason 75k hogs fell into the physics
+catch-up spiral (§12.1). Do not reintroduce a per-zone pass or a per-hog hash lookup.
+
+Behaviour the masks preserve:
+
+- A zone that is disabled or hidden this pass is left out of `activeMask`; its bits carry over, so
+  it neither fires nor forgets who was inside.
+- When `_triggerZones` is rebuilt (a new list), `_zoneMasks` is cleared: every hog inside a zone
+  enters it again, as it did when rebuilt zones started with empty occupant sets.
+- At most `MAX_TRIGGER_ZONES = 64` zones are tested (one bit each); extras are ignored with a warning.
+- `_zoneMasks` is sized to `_bodyCapacity` and grown with `_hogStates` in `SpawnHogs`. The scan holds
+  a span over it, re-taken if a `HogZoneTriggered` handler spawned hogs and grew it mid-pass.
 
 ### Trigger zone shapes must not connect VisibilityChanged
 
@@ -955,9 +1009,31 @@ sparse at high kill rates.
 
 ### Frame stamp must advance after Sync, not before
 
-`_hashFrameStamp` is advanced after `_rd.Sync()`. Moving it before `Submit`
+`_hashFrameStamp` is advanced in `CompleteGpuTick`, after `_rd.Sync()` and before the next
+tick's push constants are written. Moving it between writing the push constants and `Submit`
 would cause the hash build, projectile and physics shaders in the same frame to disagree on
 which stamp is "current", leading to physics seeing stale hash buckets.
+
+### The GPU runs a tick behind — code that reads it must allow for that
+
+`_PhysicsProcess` returns with its dispatch still running; `CompleteGpuTick` at the top of the
+next one syncs it. Consequences for new code:
+
+- **Read GPU buffers only after `CompleteGpuTick`.** `BufferGetData` (or anything else on `_rd`)
+  between the `Submit` and that `Sync` is not allowed on a local RenderingDevice.
+  `UpdateProjectileLifetimes` is called after it for this reason. `Dispose` syncs a pending tick
+  before freeing anything.
+- **Use the readback's count, not `NumBodies`.** Hogs spawned since the dispatch (from `_Process`,
+  or by the trigger-zone pass) have no row in the instance buffer yet, and the capacity growth
+  they queued is only applied at the next flush — the buffer may be smaller than `NumBodies` rows.
+  The readback covers `_gpuTickBodies`; the compaction loop, `UpdateLabels` and
+  `ProcessTriggerZones` take their count from the span.
+- **Growth re-uploads the MultiMesh.** `ApplyPhysicsGrowth` resizes `Multimesh.InstanceCount`,
+  which clears it, and the next readback is a tick away, so it resizes `_transformFloats` (keeping
+  the last compacted hogs) and uploads it again with `_visibleHogCount`. Without that, the crowd
+  vanished for one frame per growth (11 blank frames over a 10k → 38k spawn run). Note that
+  `Multimesh.VisibleInstanceCount` still reads the old value after the resize, so a test has to
+  look at `RenderingServer.MultimeshGetBuffer` to see the blank frame.
 
 ### Do not mark the body buffer `coherent`
 
@@ -1021,6 +1097,8 @@ Before marking any task complete:
       still derived from the live types, and the chain still terminates (§7)
 - [ ] If a new buffer RID field was added → `Dispose()` frees it; `SpawnHogs`
       rebuilds its uniform set
+- [ ] If new code reads a GPU buffer or the transform readback → it runs after
+      `CompleteGpuTick`'s `Sync`, and counts bodies from the readback, not `NumBodies` (§14)
 - [ ] If a new per-frame code path was added in C# → no heap allocations
       (verify with Rider's Heap Allocations Viewer or manual audit)
 - [ ] If a new trigger effect key was added → `FindCollisionShapes`,
