@@ -6,7 +6,24 @@ using Godot;
 
 public sealed partial class SquadMultiMeshInstance3D
 {
-  private void SetupMultiMesh() => Multimesh.InstanceCount = NumBodies;
+  private void SetupMultiMesh()
+  {
+    Multimesh.InstanceCount = NumBodies;
+
+    // The footprint physics keeps out of walls: the drawn mesh's XZ bounds. Falls back to a
+    // BodyRadius square when there is no mesh to measure.
+    var mesh = Multimesh.Mesh;
+    if (mesh == null)
+    {
+      _hogFootprintMin = new Vector2(-BodyRadius, -BodyRadius);
+      _hogFootprintMax = new Vector2(BodyRadius, BodyRadius);
+      return;
+    }
+
+    var aabb = mesh.GetAabb();
+    _hogFootprintMin = new Vector2(aabb.Position.X, aabb.Position.Z);
+    _hogFootprintMax = new Vector2(aabb.End.X, aabb.End.Z);
+  }
 
   private void SetupCompute()
   {
@@ -57,7 +74,6 @@ public sealed partial class SquadMultiMeshInstance3D
         BombOriginX = 0.0f,
         BombOriginY = 0.0f,
         DamagedTime = 0.0f,
-        State = 0,
       };
     }
 
@@ -86,16 +102,16 @@ public sealed partial class SquadMultiMeshInstance3D
 
     // --- Spatial hash buffers (fixed size, independent of NumBodies) ---
     _hashPushBytes = new byte[HASH_BUILD_PUSH_SIZE];
-    // counts: one uint per bucket, plus one trailing uint used as the overflow counter
-    // (HASH_OVERFLOW_SLOT in spatial_hash_build.glsl) — all cleared to 0 on creation
+    // counts: one uint per grid bucket, the airborne bucket's uint, and a trailing uint used
+    // as the overflow counter (HASH_OVERFLOW_SLOT in spatial_hash_build.glsl) — all cleared
+    // to 0 on creation
     _hashCountsBuffer = _rd.StorageBufferCreate(
       HASH_COUNTS_BUFFER_SIZE,
       new byte[HASH_COUNTS_BUFFER_SIZE]
     );
-    // entries: HASH_MAX_PER_CELL body indices per bucket
-    _hashEntriesBuffer = _rd.StorageBufferCreate(
-      HASH_TABLE_SIZE * HASH_MAX_PER_CELL * sizeof(uint)
-    );
+    // entries: HASH_MAX_PER_CELL body indices per grid bucket, then HASH_AIR_MAX for the
+    // airborne bucket
+    _hashEntriesBuffer = _rd.StorageBufferCreate(HASH_ENTRIES_BUFFER_SIZE);
 
     // --- Spatial hash build shader ---
     var hashFile = GD.Load<RDShaderFile>("res://compute_shaders/spatial_hash_build.glsl");
@@ -273,6 +289,10 @@ public sealed partial class SquadMultiMeshInstance3D
     floats[PHYS_PUSH_Y_OFFSET] = YOffset;
     uints[PHYS_PUSH_FRAME_STAMP] = _hashFrameStamp;
     floats[PHYS_PUSH_HOG_GRAVITY_SCALE] = HogGravityScale;
+    floats[PHYS_PUSH_FOOTPRINT_MIN_X] = _hogFootprintMin.X;
+    floats[PHYS_PUSH_FOOTPRINT_MIN_Z] = _hogFootprintMin.Y;
+    floats[PHYS_PUSH_FOOTPRINT_MAX_X] = _hogFootprintMax.X;
+    floats[PHYS_PUSH_FOOTPRINT_MAX_Z] = _hogFootprintMax.Y;
   }
 
   private void WriteHashBuildPush(int numBodies, float yOffset)

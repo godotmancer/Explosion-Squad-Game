@@ -3,7 +3,7 @@
 
 layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
 
-// ⚠ KEEP IN SYNC — 28 floats, identical field order in all four copies:
+// ⚠ KEEP IN SYNC — 30 floats, identical field order in all four copies:
 //   compute_shaders/physics_compute.glsl        (this file)
 //   compute_shaders/spatial_hash_build.glsl
 //   compute_shaders/projectile_compute.glsl
@@ -11,41 +11,40 @@ layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
 // Adding/reordering/resizing a field in one without the others silently
 // corrupts the buffer stride. No GLSL #include exists, so this is manual.
 struct Body {
-    vec2  position;
-    vec2  velocity;
-    float height;
-    float vertical_velocity;
-    float radius;
-    float mass;
-    float facing_angle;
-    float pad7;               // 7   spare — was wander_angle, which is rebuilt from scratch
-                              //     every frame and so is now a local in main()
-    float health;
-    float last_hit_time;
-    float bomb_origin_x;
-    float bomb_origin_y;
-    float damaged_time;       // wall-clock time after which DAMAGED bit clears
-    uint  state;              // bitwise behaviour flags (see STATE_* constants)
+    vec2  position;              //  0
+    vec2  velocity;              //  2
+    float height;                //  4
+    float vertical_velocity;     //  5
+    float radius;                //  6
+    float mass;                  //  7
+    float facing_angle;          //  8
+    float health;                //  9
+    float last_hit_time;         // 10
+    float bomb_origin_x;         // 11
+    float bomb_origin_y;         // 12
+    float damaged_time;          // 13  wall-clock time after which DAMAGED bit clears
     // projectile effect accumulators (written by projectile_compute, applied/cleared here)
-    uint  damage_accum;       // 16  flat damage × 256 (atomicAdd)
-    uint  contagion_expiry_u; // 17  ABSOLUTE time at which the contagion lapses × 256.
-                              //     Raised by atomicMax only (projectile_compute on hit,
-                              //     neighbour threads via try_spread_contagion) and never
-                              //     decremented, so "still infected" is a comparison
-                              //     against `time` rather than a read-modify-write that
-                              //     concurrent spreaders could lose.
-    uint  dps_rate_u;         // 18  contagion DPS × 256 (atomicMax)
-    uint  body_flags;         // 19  BODY_FLAG_TELEPORT
-    float teleport_x;         // 20
-    float teleport_z;         // 21
-    int   impulse_x;          // 22  knockback impulse X × 1000 (atomicAdd)
-    int   impulse_z;          // 23  knockback impulse Z × 1000
-    int   impulse_y;          // 24  vertical (Y) knockback × 1000
-    float teleport_y;         // 25  teleport spawn height (world Y); 0 = near ground
-    float speed_ema;          // 26  exponentially-smoothed speed, drives locomotion-state
-                              //     classification only (see STATE_EASE_RATE below) — written
-                              //     here, unused by the other three copies of this struct
-    float pad3;               // 27
+    uint  damage_accum;          // 14  flat damage × 256 (atomicAdd)
+    uint  body_flags;            // 15  BODY_FLAG_TELEPORT
+    // One entry per contagion type, indexed by CONT_FIRE / CONT_POISON / CONT_DRUNK, so each
+    // type runs on its own clock. Both are written only through infect(), by projectile hits
+    // and by neighbour threads spreading contagion during this dispatch.
+    uint  contagion_expiry_u[3]; // 16  ABSOLUTE time at which that type lapses × 256. Only
+                                 //     ever raised (atomicMax), so "infected" is a comparison
+                                 //     against `time`, not a countdown concurrent spreaders
+                                 //     could lose.
+    uint  contagion_dps_u[3];    // 19  that type's damage per second × 256
+    float teleport_x;            // 22
+    float teleport_z;            // 23
+    float teleport_y;            // 24  teleport spawn height (world Y); 0 = near ground
+    int   impulse_x;             // 25  knockback impulse X × 1000 (atomicAdd)
+    int   impulse_z;             // 26  knockback impulse Z × 1000
+    int   impulse_y;             // 27  vertical (Y) knockback × 1000
+    float speed_ema;             // 28  exponentially-smoothed speed, drives locomotion-state
+                                 //     classification only (see STATE_EASE_RATE below) — written
+                                 //     here, unused by the other three copies of this struct
+    float pad29;                 // 29  keeps the size a multiple of 8 bytes (vec2 alignment),
+                                 //     so C#'s packed GpuBody and std430 agree on the stride
 };
 
 struct Obstacle {
@@ -102,6 +101,11 @@ layout(push_constant, std430) uniform Params {
     uint  frame_stamp;   // frame index mod 65536, as given to spatial_hash_build.glsl — buckets
                          // carrying any other stamp are stale
     float hog_gravity_scale;
+    // XZ bounds of the drawn hog mesh in its own frame (x = right, y = forward), from the
+    // MultiMesh's mesh AABB. The obstacle hard contact keeps this box out of walls; the
+    // BodyRadius circle used between hogs is much smaller than what is drawn.
+    vec2  footprint_min;
+    vec2  footprint_max;
 };
 
 // =============================================================================
@@ -295,11 +299,17 @@ const uint STATE_FLEEING   = 16u;   // bit 4
 const uint STATE_IN_FEAR   = 32u;   // bit 5
 const uint STATE_AIRBORNE  = 64u;   // bit 6
 const uint STATE_DEAD      = 128u;  // bit 7
-// Contagion state bits (set by projectile_compute, preserved by physics)
+// Contagion state bits, derived each frame from which contagion types are live — type t's
+// bit is STATE_ON_FIRE << t
 const uint STATE_ON_FIRE   = 256u;  // bit 8
 const uint STATE_POISONED  = 512u;  // bit 9
 const uint STATE_DRUNK     = 1024u; // bit 10
-const uint CONTAGION_MASK  = STATE_ON_FIRE | STATE_POISONED | STATE_DRUNK;
+
+// Contagion types — indices into Body.contagion_expiry_u[] / contagion_dps_u[]
+const uint CONT_FIRE   = 0u;
+const uint CONT_POISON = 1u;
+const uint CONT_DRUNK  = 2u;
+const uint CONT_TYPES  = 3u;
 
 // Body flag bits (body_flags field)
 const uint BODY_FLAG_TELEPORT  = 1u;
@@ -369,6 +379,16 @@ vec2 rotate2d(vec2 v, float angle) {
 // edge0 >= edge1 undefined, so this is the spec-safe spelling of it.
 float smooth_fall(float lo, float hi, float x) {
     return 1.0 - smoothstep(lo, hi, x);
+}
+
+// How far the drawn hog reaches from its centre in world direction `dir` (unit, XZ): the
+// support distance of its footprint box, given the hog's right and forward axes in world XZ.
+// Exact for a flat surface, whatever way the hog is turned.
+float footprint_reach(vec2 dir, vec2 right, vec2 fwd) {
+    float lx = dot(dir, right);
+    float lz = dot(dir, fwd);
+    return (lx >= 0.0 ? footprint_max.x : footprint_min.x) * lx
+         + (lz >= 0.0 ? footprint_max.y : footprint_min.y) * lz;
 }
 
 // =============================================================================
@@ -468,26 +488,29 @@ uint child_contagion_expiry(float self_remaining, float max_duration, uint now_u
     return now_u + uint(child_duration * CONT_TIME_SCALE);
 }
 
-// Probabilistically pass a contagion (fire/poison) to neighbour `i`, expiring at
-// new_expiry (from child_contagion_expiry). DPS is inherited at full strength; only the
-// window shrinks.
-void try_spread_contagion(int i, uint flag, uint new_expiry, uint self_dps,
+// ⚠ KEEP IN SYNC with the copy in projectile_compute.glsl.
+// Give body i contagion type t until new_expiry, at dps_u damage per second (× 256). The
+// expiry is only ever raised, so concurrent infectors cannot lose each other's time. Keep
+// atomicMax's return value: the one invocation that lifts a LAPSED expiry into the future
+// starts a new outbreak of this type on this hog, and it replaces the DPS the previous one
+// left behind (a stronger old infection would otherwise outlive its own window). Everyone
+// else only raises it. A concurrent infector whose atomicMax lands between the winner's two
+// atomics loses its DPS to the winner's for that outbreak — accepted, since infections of
+// one type normally carry the same DPS.
+void infect(int i, uint t, uint new_expiry, uint dps_u, uint now_u) {
+    uint prev_expiry = atomicMax(bodies[i].contagion_expiry_u[t], new_expiry);
+    if (prev_expiry <= now_u && new_expiry > prev_expiry)
+        atomicExchange(bodies[i].contagion_dps_u[t], dps_u);
+    else
+        atomicMax(bodies[i].contagion_dps_u[t], dps_u);
+}
+
+// Probabilistically pass contagion type t to neighbour `i`, expiring at new_expiry (from
+// child_contagion_expiry). DPS is inherited at full strength; only the window shrinks.
+void try_spread_contagion(int i, uint t, uint new_expiry, uint self_dps,
                           float prob, uint rnd_seed, uint now_u) {
     if (hash(rnd_seed) >= prob) return;
-
-    // Raise the expiry FIRST and keep atomicMax's return value. Whichever thread lifts a
-    // lapsed expiry into the future is the unambiguous first infector, and only that thread
-    // retires the previous contagion's type bits and DPS. Doing the reset here rather than
-    // on expiry in main() is what makes it race-free: there is exactly one winner, and it
-    // clears before setting its own bit, so nothing can drop a bit it just set.
-    uint prev_expiry = atomicMax(bodies[i].contagion_expiry_u, new_expiry);
-    if (prev_expiry <= now_u && new_expiry > prev_expiry) {
-        atomicAnd(bodies[i].state, ~CONTAGION_MASK);
-        atomicAnd(bodies[i].dps_rate_u, 0u);
-    }
-
-    atomicOr (bodies[i].state, flag);
-    atomicMax(bodies[i].dps_rate_u, self_dps);
+    infect(i, t, new_expiry, self_dps, now_u);
 }
 
 // =============================================================================
@@ -582,17 +605,21 @@ void main() {
     self.damage_accum = 0u;
 
     // --- Contagion DPS tick ---
-    // No countdown to write: contagion_expiry_u is an absolute timestamp that only ever
-    // ratchets upward via atomicMax, so being infected is a comparison. The previous
-    // countdown form could not work — it decremented the local copy and then took
-    // max(local, stored) before the writeback, and `stored` was always the larger
-    // pre-decrement value, so the tick was discarded and contagion never lapsed.
+    // No countdown to write: each expiry is an absolute timestamp that only ever ratchets
+    // upward via atomicMax, so being infected is a comparison. (A countdown cannot survive
+    // the concurrent spreaders — an earlier version lost every tick to them, and contagion
+    // never lapsed.) Each type runs on its own clock and deals its own DPS, so a drunk hog
+    // set on fire burns for the fire's window, not the drink's.
     uint now_u = uint(time * CONT_TIME_SCALE); // `time` in the same fixed point as the expiry
-    bool cont_active = self.contagion_expiry_u > now_u;
-    if (cont_active) {
-        float dps = float(self.dps_rate_u) / DAMAGE_SCALE;
-        self.health = max(0.0, self.health - dps * delta_time);
+    uint contagion_bits = 0u; // STATE_ON_FIRE / POISONED / DRUNK for every live type
+    float contagion_dps = 0.0;
+    for (uint t = 0u; t < CONT_TYPES; t++) {
+        if (self.contagion_expiry_u[t] > now_u) {
+            contagion_bits |= STATE_ON_FIRE << t;
+            contagion_dps  += float(self.contagion_dps_u[t]) / DAMAGE_SCALE;
+        }
     }
+    self.health = max(0.0, self.health - contagion_dps * delta_time);
 
     // --- Teleport ---
     if ((self.body_flags & BODY_FLAG_TELEPORT) != 0u) {
@@ -625,7 +652,7 @@ void main() {
     self.impulse_y = 0;
 
     // --- Drunk jitter ---
-    if ((self.state & STATE_DRUNK) != 0u && cont_active) {
+    if ((contagion_bits & STATE_DRUNK) != 0u) {
         float jt = time * 7.3 + float(id) * 1.7;
         self.velocity.x += sin(jt) * DRUNK_JITTER_STR * delta_time;
         self.velocity.y += cos(jt * 0.7) * DRUNK_JITTER_STR * delta_time;
@@ -654,22 +681,21 @@ void main() {
     bool  can_gain_fear = bomb_fear_duration > 0.0
                        && FEAR_MAX_SPREAD > self_fear + FEAR_SPREAD_THRESHOLD;
 
-    // What each contagion type would hand a neighbour. It depends only on this body, so it is
-    // worked out once here rather than per neighbour. Zero means nothing to pass on: either
-    // the contagion is not live — gated on the expiry, since the type bits are sticky past it
-    // (see the writeback comment at the end of main), so a bit-only test would let a
-    // burnt-out hog keep igniting its neighbours — or the inherited window would fall below
-    // the spread floor.
+    // What each contagion type would hand a neighbour, from that type's own remaining time.
+    // It depends only on this body, so it is worked out once here rather than per neighbour.
+    // Zero means nothing to pass on: the type is not live, or the inherited window would fall
+    // below the spread floor. (The live bits guarantee the expiry is ahead of now_u, so the
+    // subtraction cannot wrap.)
     uint fire_child_expiry   = 0u;
     uint poison_child_expiry = 0u;
-    if (cont_active) {
-        // cont_active guarantees the expiry is in the future, so this cannot wrap.
-        float self_remaining = float(self.contagion_expiry_u - now_u) / CONT_TIME_SCALE;
-        if ((self.state & STATE_ON_FIRE) != 0u)
-            fire_child_expiry = child_contagion_expiry(self_remaining, FIRE_SPREAD_MAX_DUR, now_u);
-        if ((self.state & STATE_POISONED) != 0u)
-            poison_child_expiry = child_contagion_expiry(self_remaining, POISON_SPREAD_MAX_DUR, now_u);
-    }
+    if ((contagion_bits & STATE_ON_FIRE) != 0u)
+        fire_child_expiry = child_contagion_expiry(
+            float(self.contagion_expiry_u[CONT_FIRE] - now_u) / CONT_TIME_SCALE,
+            FIRE_SPREAD_MAX_DUR, now_u);
+    if ((contagion_bits & STATE_POISONED) != 0u)
+        poison_child_expiry = child_contagion_expiry(
+            float(self.contagion_expiry_u[CONT_POISON] - now_u) / CONT_TIME_SCALE,
+            POISON_SPREAD_MAX_DUR, now_u);
     bool spreads_fire   = fire_child_expiry   != 0u;
     bool spreads_poison = poison_child_expiry != 0u;
 
@@ -802,15 +828,10 @@ void main() {
                         // the drunk one, so this needs no atomics and re-evaluates every frame the
                         // two stay close. Inner ring only — DRUNK_FEAR_RADIUS sits inside the 3×3's
                         // guaranteed coverage, so it does not depend on `ring`.
-                        //
-                        // Gate on expiry, not the DRUNK bit: the bits are sticky past expiry
-                        // (see the writeback comment at the end of main), so a sober hog
-                        // keeps its DRUNK bit and a bit-only test would keep radiating fear.
                         if (can_gain_fear
                             && dist2 < DRUNK_FEAR_RADIUS * DRUNK_FEAR_RADIUS
-                            && n.contagion_expiry_u > now_u
-                            && (n.state & STATE_DRUNK) != 0u) {
-                            float n_remaining = float(n.contagion_expiry_u - now_u) / CONT_TIME_SCALE;
+                            && n.contagion_expiry_u[CONT_DRUNK] > now_u) {
+                            float n_remaining = float(n.contagion_expiry_u[CONT_DRUNK] - now_u) / CONT_TIME_SCALE;
                             // Falls off with both the neighbour's remaining drunkenness and the
                             // gap between us — the second factor keeps the effect from having a
                             // hard edge at DRUNK_FEAR_RADIUS.
@@ -830,12 +851,14 @@ void main() {
                         // Per-frame random seed mixes id, neighbour index and time so no
                         // two pairs (and no two frames) roll the same probability.
                         if (spreads_fire && dist2 < FIRE_SPREAD_RADIUS * FIRE_SPREAD_RADIUS) {
-                            try_spread_contagion(i, STATE_ON_FIRE, fire_child_expiry, self.dps_rate_u,
-                                FIRE_SPREAD_PROB, id * 31u + uint(i) + uint(time * 100.0 + 0.5), now_u);
+                            try_spread_contagion(i, CONT_FIRE, fire_child_expiry,
+                                self.contagion_dps_u[CONT_FIRE], FIRE_SPREAD_PROB,
+                                id * 31u + uint(i) + uint(time * 100.0 + 0.5), now_u);
                         }
                         if (spreads_poison && dist2 < POISON_SPREAD_RADIUS * POISON_SPREAD_RADIUS) {
-                            try_spread_contagion(i, STATE_POISONED, poison_child_expiry, self.dps_rate_u,
-                                POISON_SPREAD_PROB, id * 47u + uint(i) * 3u + uint(time * 100.0 + 1.5), now_u);
+                            try_spread_contagion(i, CONT_POISON, poison_child_expiry,
+                                self.contagion_dps_u[CONT_POISON], POISON_SPREAD_PROB,
+                                id * 47u + uint(i) * 3u + uint(time * 100.0 + 1.5), now_u);
                         }
                     }
                 }
@@ -1069,27 +1092,40 @@ void main() {
     // OBSTACLE HARD CONSTRAINT  (Position-Based Dynamics)
     // =========================================================================
     if (!is_falling) {
+        // The hog's own axes in world XZ — the instance basis written at the tail maps local
+        // +z (forward) to (sin f, cos f) and local +x (right) to (cos f, -sin f) — and the
+        // furthest its drawn footprint reaches in any direction, for the broad phase. The
+        // facing is still last frame's (it is updated below), so a hog turning its nose into a
+        // wall can graze it for a frame before the next pass pushes it clear.
+        vec2  fwd       = vec2(sin(self.facing_angle), cos(self.facing_angle));
+        vec2  right     = vec2(fwd.y, -fwd.x);
+        float max_reach = max(self.radius, length(max(abs(footprint_min), abs(footprint_max))));
+
         for (int iter = 0; iter < PBD_ITERATIONS; iter++) {
             for (int oi = 0; oi < num_obstacles; oi++) {
                 Obstacle obs = obstacles[oi];
 
-                // Broad phase — same centre-distance bound as the soft-steering loop, but the
-                // contact radius here can grow with surface speed, so the bound has to allow
-                // for it. |surf_vel| <= |linear| + |angular| * |offset from centre|, which is
-                // an upper bound on the speed_clearance computed below, so this stays
-                // conservative for moving and rotating obstacles too.
+                // Broad phase — same centre-distance bound as the soft-steering loop, but taken
+                // to the margin-padded surface only (the hog's own reach arrives through
+                // contact_radius below), and allowing for a contact radius that grows with
+                // surface speed. |surf_vel| <= |linear| + |angular| * |offset from centre|, an
+                // upper bound on the speed_clearance computed below, so this stays conservative
+                // for moving and rotating obstacles too.
                 vec2  to_obs = self.position - obs.center;
                 float dist_centre = length(to_obs);
-                vec2  padded = obs.half_extents + vec2(obs.margin + self.radius);
+                vec2  padded = obs.half_extents + vec2(obs.margin);
                 float max_surf_speed = length(obs.velocity) + (abs(obs.angular_vel) * dist_centre);
                 float max_clearance  = max_surf_speed * delta_time * PBD_VEL_LOOKAHEAD;
-                if (dist_centre > padded.x + padded.y + max(self.radius, max_clearance)) {
+                if (dist_centre > padded.x + padded.y + max_reach + max_clearance) {
                     continue;
                 }
 
+                // Distance from the hog's CENTRE to the margin-padded surface; how far the hog
+                // reaches toward it is added below. (The soft steering above pads by BodyRadius
+                // instead: it wants a gap to steer by, not a contact.)
                 float dist_surface;
                 vec2  normal;
-                get_obstacle_surface(obs, self.position, self.radius, dist_surface, normal);
+                get_obstacle_surface(obs, self.position, 0.0, dist_surface, normal);
 
                 // Surface velocity at this contact point (linear + rotational components)
                 vec2 surf_vel = obs.velocity + vec2(
@@ -1097,18 +1133,21 @@ void main() {
                     -obs.angular_vel * (self.position.x - obs.center.x)
                 );
 
-                // Expand the effective contact radius to account for fast-moving surfaces
+                // In contact once the DRAWN hog reaches the surface: its footprint's extent
+                // toward the obstacle, never less than BodyRadius. BodyRadius alone is far
+                // smaller than the mesh and let hogs sink into walls. A moving surface reaches
+                // further, by the distance it will cover in PBD_VEL_LOOKAHEAD frames, so a
+                // sweeping wall cannot tunnel through a hog.
+                float reach           = max(self.radius, footprint_reach(-normal, right, fwd));
                 float speed_clearance = length(surf_vel) * delta_time * PBD_VEL_LOOKAHEAD;
-                float contact_radius  = max(self.radius, speed_clearance);
+                float contact_radius  = reach + speed_clearance;
 
                 if (dist_surface < contact_radius) {
-                    // Push position out of the obstacle
-                    float shortfall = dist_surface < 0.0
-                        ? -dist_surface + speed_clearance
-                        : contact_radius - dist_surface;
-                    self.position += normal * shortfall;
+                    // Push out until the hog rests against the surface (plus the lookahead)
+                    self.position += normal * (contact_radius - dist_surface);
 
-                    // Blend velocity toward the surface velocity (friction/conveyor effect)
+                    // Blend velocity toward the surface velocity (friction/conveyor effect),
+                    // harder the deeper the overlap — fully once the centre was inside
                     self.velocity = dist_surface < 0.0
                         ? surf_vel
                         : mix(self.velocity, surf_vel, 1.0 - clamp(dist_surface / contact_radius, 0.0, 1.0));
@@ -1183,12 +1222,15 @@ void main() {
     }
 
     // =========================================================================
-    // BEHAVIOUR STATE  (bitwise flags — read back by C# via transform buffer)
+    // BEHAVIOUR STATE  (bitwise flags — read back by C# via the instance buffer)
     // =========================================================================
-    // st carries only the bits this thread owns. The contagion bits are NOT merged into
-    // it: they live in bodies[id].state, where neighbour threads in this same dispatch
-    // set them with atomicOr, and they are combined in memory below.
-    uint st = 0u;
+    // Built fresh every frame, contagion bits included: those come from this body's live
+    // contagion types (contagion_bits, above), so a type's bit clears on the frame it
+    // lapses and nothing but this thread ever produces them. They used to sit in a shared
+    // state word that neighbours set with atomics, which forced them to be sticky past
+    // expiry. A type a neighbour hands us during this dispatch shows up next frame, as its
+    // tint does.
+    uint st = contagion_bits;
     if (self.health <= 0.0) {
         st |= STATE_DEAD;
     } else {
@@ -1214,35 +1256,15 @@ void main() {
         }
     }
 
-    // Two atomics rather than a plain store: atomicAnd drops last frame's locomotion bits
-    // while KEEPING the contagion bits, atomicOr sets this frame's. A neighbour's atomicOr
-    // landing anywhere in between survives both, which the previous `bodies[id] = self`
-    // struct store silently discarded.
-    //
-    // The contagion bits are deliberately never cleared here. Clearing them from this
-    // thread's view of the expiry is a race with real symptoms: a neighbour sets our type
-    // bit and raises our expiry inside this same dispatch, and if we read the expiry before
-    // its atomicMax lands we would wipe the bit while the raised expiry survived — leaving
-    // a hog burning invisibly (no bit for the colour to match) and unable to pass it on
-    // (spreads_* requires the bit). So the bits are sticky, every consumer gates on the
-    // expiry instead, and retiring a lapsed contagion's bits is the first infector's job
-    // (see try_spread_contagion above and projectile_compute).
-    atomicAnd(bodies[id].state, CONTAGION_MASK);
-    // atomicOr returns the pre-OR value, which is the contagion bits that survived the
-    // atomicAnd — including any a neighbour set during this dispatch. So this costs nothing
-    // extra and gives the exact post-write state the old separate transform pass used to read
-    // back after its barrier.
-    uint final_state = atomicOr(bodies[id].state, st) | st;
-
     // -------------------------------------------------------------------------
     // Field-by-field writeback.
     //
-    // `bodies[id] = self` cannot be used here: it would also rewrite state,
-    // contagion_expiry_u and dps_rate_u from this thread's stale local copy, clobbering
-    // the atomic writes neighbour threads make to those three fields during this same
-    // dispatch. That is what made fire and poison spread drop events at random.
+    // `bodies[id] = self` cannot be used here: it would also rewrite contagion_expiry_u[]
+    // and contagion_dps_u[] from this thread's stale local copy, clobbering the atomic
+    // writes neighbour threads make to them during this same dispatch. That is what made
+    // fire and poison spread drop events at random.
     //
-    // radius, mass, teleport_x, teleport_z, teleport_y, pad7 and pad3 are omitted because
+    // radius, mass, teleport_x, teleport_z, teleport_y and pad29 are omitted because
     // physics never modifies them, so this also moves less data than the struct store.
     // -------------------------------------------------------------------------
     bodies[id].position          = self.position;
@@ -1267,7 +1289,7 @@ void main() {
     // =========================================================================
     // Formerly a separate transform_compute dispatch. Everything below comes from registers
     // this shader already holds, so merging removed a dispatch, a barrier, and a re-read of
-    // all 112 bytes of every Body. `speed` was computed in the facing-angle section above and
+    // every whole Body. `speed` was computed in the facing-angle section above and
     // is still current: the gravity block only touches vertical_velocity and height.
 
     // Y-axis rotation
@@ -1275,11 +1297,12 @@ void main() {
     float sf = sin(self.facing_angle);
 
     // --- Contagion tint, eased out over the contagion's final seconds ---
-    // Uses self.contagion_expiry_u as read at the top of main. A hog infected by a NEIGHBOUR
-    // during this same dispatch therefore tints one frame later than it used to, when the
-    // transform pass read the buffer back after a barrier. Projectile hits are unaffected —
-    // those land in the previous dispatch. One frame at 60 Hz is not observable, and avoiding
-    // a second read of the expiry per body is the whole point of the merge.
+    // The highest-priority live type colours the hog — fire, then poison, then drunk — and
+    // fades with that type's own remaining time, so a drunk hog set on fire glows red until
+    // the fire lapses and then purple again. Uses the expiries as read at the top of main: a
+    // hog infected by a NEIGHBOUR during this same dispatch tints one frame later. Projectile
+    // hits are unaffected — those land in the previous dispatch. One frame at 60 Hz is not
+    // observable, and avoiding a second read of the expiries per body is the point.
     //
     // The colours below leave the display range (see FIRE_GLOW and friends) — the pulse now
     // scales the whole colour rather than one channel, so it modulates the glow instead of
@@ -1287,18 +1310,21 @@ void main() {
     // late in its window sits near 1.0 and emits nothing, and only a freshly infected hog is
     // hot enough to bloom.
     vec3 tint = vec3(1.0);
-    if (self.contagion_expiry_u > now_u) {
-        vec3 contagion_tint = vec3(1.0);
-        if ((final_state & STATE_ON_FIRE) != 0u) {
+    if (contagion_bits != 0u) {
+        uint shown = (contagion_bits & STATE_ON_FIRE)  != 0u ? CONT_FIRE
+                   : (contagion_bits & STATE_POISONED) != 0u ? CONT_POISON
+                   :                                           CONT_DRUNK;
+        vec3 contagion_tint;
+        if (shown == CONT_FIRE) {
             float pulse = 0.8 + 0.2 * sin(time * 10.0 + float(id) * 0.7);
             contagion_tint = FIRE_TINT * (FIRE_GLOW * pulse);
-        } else if ((final_state & STATE_POISONED) != 0u) {
+        } else if (shown == CONT_POISON) {
             contagion_tint = POISON_TINT * POISON_GLOW;
-        } else if ((final_state & STATE_DRUNK) != 0u) {
+        } else {
             float pulse = 0.7 + 0.3 * sin(time * 4.0 + float(id) * 1.3);
             contagion_tint = DRUNK_TINT * (DRUNK_GLOW * pulse);
         }
-        float remaining = float(self.contagion_expiry_u - now_u) / CONT_TIME_SCALE;
+        float remaining = float(self.contagion_expiry_u[shown] - now_u) / CONT_TIME_SCALE;
         tint = mix(vec3(1.0), contagion_tint, clamp(remaining / CONTAGION_FADE_TIME, 0.0, 1.0));
     }
 
@@ -1308,5 +1334,5 @@ void main() {
     instances[o + 1u] = vec4(0.0, 1.0, 0.0, self.height);
     instances[o + 2u] = vec4(-sf, 0.0,  cf, self.position.y);
     instances[o + 3u] = vec4(tint, 1.0);
-    instances[o + 4u] = vec4(speed, self.health, uintBitsToFloat(final_state), time);
+    instances[o + 4u] = vec4(speed, self.health, uintBitsToFloat(st), time);
 }

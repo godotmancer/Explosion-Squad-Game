@@ -1,8 +1,9 @@
 // =============================================================================
 // SPATIAL HASH BUILD SHADER  (single-pass, no clear required)
 // =============================================================================
-// Inserts alive ground bodies into a per-bucket hash table that physics_compute
-// reads this same frame.
+// Inserts alive bodies into a per-bucket hash table read this same frame: grounded
+// ones into the grid (physics_compute and projectile_compute), airborne ones into a
+// separate airborne bucket (projectile_compute only — see HASH_AIR_BUCKET).
 //
 // Dispatch once per frame: ceil(NumBodies / 64) workgroups.
 //
@@ -26,15 +27,15 @@
 //
 // Bindings (set 0):
 //   0 — BodiesBuffer      (readonly)
-//   1 — HashCountsBuffer  (atomic)   uint[TABLE_SIZE + 1]
-//   2 — HashEntriesBuffer (write)    uint[TABLE_SIZE * MAX_PER_CELL]
+//   1 — HashCountsBuffer  (atomic)   uint[TABLE_SIZE + 2]  grid, airborne bucket, overflow
+//   2 — HashEntriesBuffer (write)    uint[TABLE_SIZE * MAX_PER_CELL + AIR_MAX]
 // =============================================================================
 #[compute]
 #version 450
 
 layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
 
-// ⚠ KEEP IN SYNC — 28 floats, identical field order in all four copies:
+// ⚠ KEEP IN SYNC — 30 floats, identical field order in all four copies:
 //   compute_shaders/physics_compute.glsl
 //   compute_shaders/spatial_hash_build.glsl        (this file)
 //   compute_shaders/projectile_compute.glsl
@@ -42,33 +43,30 @@ layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
 // Adding/reordering/resizing a field in one without the others silently
 // corrupts the buffer stride. No GLSL #include exists, so this is manual.
 struct Body {
-    vec2  position;
-    vec2  velocity;
-    float height;
-    float vertical_velocity;
-    float radius;
-    float mass;
-    float facing_angle;
-    float pad7;               // 7   spare (was wander_angle)
-    float health;
-    float last_hit_time;
-    float bomb_origin_x;
-    float bomb_origin_y;
-    float damaged_time;
-    uint  state;
-    // projectile effect accumulators (written by projectile_compute, applied/cleared by physics_compute)
-    uint  damage_accum;       // 16  flat damage × 256 (atomicAdd)
-    uint  contagion_expiry_u; // 17  absolute contagion expiry time × 256 (atomicMax)
-    uint  dps_rate_u;         // 18  contagion DPS × 256 (atomicMax)
-    uint  body_flags;         // 19  BODY_FLAG_TELEPORT
-    float teleport_x;         // 20
-    float teleport_z;         // 21
-    int   impulse_x;          // 22  knockback impulse X × 1000 (atomicAdd)
-    int   impulse_z;          // 23  knockback impulse Z × 1000
-    int   impulse_y;          // 24  vertical (Y) knockback impulse × 1000
-    float teleport_y;         // 25
-    float speed_ema;          // 26  written by physics_compute.glsl only, unused here
-    float pad3;               // 27
+    vec2  position;              //  0
+    vec2  velocity;              //  2
+    float height;                //  4
+    float vertical_velocity;     //  5
+    float radius;                //  6
+    float mass;                  //  7
+    float facing_angle;          //  8
+    float health;                //  9
+    float last_hit_time;         // 10
+    float bomb_origin_x;         // 11
+    float bomb_origin_y;         // 12
+    float damaged_time;          // 13
+    uint  damage_accum;          // 14  flat damage × 256 (atomicAdd)
+    uint  body_flags;            // 15  BODY_FLAG_TELEPORT
+    uint  contagion_expiry_u[3]; // 16  per contagion type: absolute expiry × 256 (atomicMax)
+    uint  contagion_dps_u[3];    // 19  per contagion type: DPS × 256
+    float teleport_x;            // 22
+    float teleport_z;            // 23
+    float teleport_y;            // 24
+    int   impulse_x;             // 25  knockback impulse × 1000 (atomicAdd)
+    int   impulse_z;             // 26
+    int   impulse_y;             // 27
+    float speed_ema;             // 28  written by physics_compute.glsl only, unused here
+    float pad29;                 // 29
 };
 
 layout(set = 0, binding = 0, std430) restrict readonly  buffer BodiesBuffer      { Body bodies[]; };
@@ -112,11 +110,21 @@ const float GROUND_EPSILON    = 0.01;
 const uint  HASH_STAMP_SHIFT  = 16u;
 const uint  HASH_COUNT_MASK   = 0xFFFFu;
 
-// Debug: one extra uint allocated past the end of the bucket array, used as a running
-// count of bodies dropped by per-cell overflow. spatial_hash() never returns an index
-// >= HASH_TABLE_SIZE, so this can never collide with a real bucket, and the
-// physics/projectile queries never read it. Sampled from C# behind DebugHashOverflow.
-const uint  HASH_OVERFLOW_SLOT = HASH_TABLE_SIZE;
+// Airborne bodies do not go into the grid. Physics never pairs a grounded hog with an
+// airborne one, so they would only cost it candidates and eat into the per-cell capacity
+// of the hogs that do use it. They go into one extra bucket instead — a flat list, stamped
+// and counted exactly like a grid bucket, whose word sits right after the grid and whose
+// entries sit after the grid's. projectile_compute scans it, so a hog in the air can still
+// be hit. spatial_hash() never returns it.
+const uint  HASH_AIR_BUCKET       = HASH_TABLE_SIZE;
+const uint  HASH_AIR_MAX          = 4096u;
+const uint  HASH_AIR_ENTRIES_BASE = HASH_TABLE_SIZE * HASH_MAX_PER_CELL;
+
+// Debug: one more uint past the airborne bucket word, used as a running count of bodies
+// dropped because their bucket was full. spatial_hash() never returns an index this high,
+// so it can never collide with a real bucket, and the physics/projectile queries never read
+// it. Sampled from C# behind DebugHashOverflow.
+const uint  HASH_OVERFLOW_SLOT    = HASH_TABLE_SIZE + 1u;
 
 // Map 2-D integer cell coords to a bucket — identical in all three shaders. A wrap-around
 // grid rather than a hash: two cells share a bucket only when they are a whole grid apart,
@@ -133,11 +141,23 @@ void main() {
     if (id >= uint(num_bodies)) return;
 
     Body b = bodies[id];
-    if (b.health <= 0.0 || b.height > y_offset + GROUND_EPSILON) return;
+    if (b.health <= 0.0) return;
 
-    int  cx     = int(floor(b.position.x / HASH_CELL_SIZE));
-    int  cz     = int(floor(b.position.y / HASH_CELL_SIZE));
-    uint bucket = spatial_hash(cx, cz);
+    // Grounded bodies go into their grid cell, airborne ones into the airborne bucket (see
+    // HASH_AIR_BUCKET). The two share the stamp/count scheme below; only where the entries
+    // live and how many fit differ.
+    uint bucket, capacity, entries_base;
+    if (b.height > y_offset + GROUND_EPSILON) {
+        bucket       = HASH_AIR_BUCKET;
+        capacity     = HASH_AIR_MAX;
+        entries_base = HASH_AIR_ENTRIES_BASE;
+    } else {
+        int cx       = int(floor(b.position.x / HASH_CELL_SIZE));
+        int cz       = int(floor(b.position.y / HASH_CELL_SIZE));
+        bucket       = spatial_hash(cx, cz);
+        capacity     = HASH_MAX_PER_CELL;
+        entries_base = bucket * HASH_MAX_PER_CELL;
+    }
 
     // -------------------------------------------------------------------------
     // Lazy bucket reset — no separate clear pass needed.
@@ -163,12 +183,13 @@ void main() {
         atomicCompSwap(hash_counts[bucket], stored, frame_stamp << HASH_STAMP_SHIFT);
     }
 
-    // Claim a slot.  The count lives in bits 0..15. It keeps climbing past
-    // HASH_MAX_PER_CELL for overflowed inserts, so it would only spill into the
-    // stamp at 65,536 inserts into one 2 m cell in a single frame.
+    // Claim a slot.  The count lives in bits 0..15. It keeps climbing past the
+    // capacity for overflowed inserts, so it would only spill into the stamp at
+    // 65,536 inserts into one bucket in a single frame (one 2 m cell, or 65,536
+    // hogs in the air at once).
     uint slot = atomicAdd(hash_counts[bucket], 1u) & HASH_COUNT_MASK;
-    if (slot < HASH_MAX_PER_CELL) {
-        hash_entries[bucket * HASH_MAX_PER_CELL + slot] = id;
+    if (slot < capacity) {
+        hash_entries[entries_base + slot] = id;
     } else {
         // Overflow is still a graceful no-op — the body is simply invisible as a
         // neighbour this frame — but it is no longer silent. The symptom (hogs walking

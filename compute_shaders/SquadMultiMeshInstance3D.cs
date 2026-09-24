@@ -202,10 +202,18 @@ public sealed partial class SquadMultiMeshInstance3D : MultiMeshInstance3D
   public const int HASH_TABLE_SIZE = 32768;
   public const int HASH_MAX_PER_CELL = 64;
 
-  // The counts buffer carries one uint per bucket plus a trailing overflow counter at
-  // index HASH_TABLE_SIZE (HASH_OVERFLOW_SLOT in spatial_hash_build.glsl).
-  public const int HASH_OVERFLOW_SLOT = HASH_TABLE_SIZE;
-  public const uint HASH_COUNTS_BUFFER_SIZE = (HASH_TABLE_SIZE + 1) * sizeof(uint);
+  // Airborne bodies are kept out of the grid and listed in one extra bucket instead, which
+  // only projectile_compute reads: its count word sits right after the grid's, and up to
+  // HASH_AIR_MAX entries sit after the grid's entries. See spatial_hash_build.glsl.
+  public const int HASH_AIR_BUCKET = HASH_TABLE_SIZE;
+  public const int HASH_AIR_MAX = 4096;
+
+  // The counts buffer carries one uint per bucket, the airborne bucket's word, and a trailing
+  // overflow counter (HASH_OVERFLOW_SLOT in spatial_hash_build.glsl).
+  public const int HASH_OVERFLOW_SLOT = HASH_TABLE_SIZE + 1;
+  public const uint HASH_COUNTS_BUFFER_SIZE = (HASH_TABLE_SIZE + 2) * sizeof(uint);
+  public const uint HASH_ENTRIES_BUFFER_SIZE =
+    ((HASH_TABLE_SIZE * HASH_MAX_PER_CELL) + HASH_AIR_MAX) * sizeof(uint);
 
   // Each bucket word is (frame stamp << 16) | entry count, and a word carrying any stamp but
   // this frame's reads as empty — that is what lets the build skip a clear pass. The stamp is
@@ -228,8 +236,8 @@ public sealed partial class SquadMultiMeshInstance3D : MultiMeshInstance3D
   private Rid _hashShader;
   private Rid _hashPipeline;
   private Rid _hashUniformSet;
-  private Rid _hashCountsBuffer; // uint[HASH_TABLE_SIZE]
-  private Rid _hashEntriesBuffer; // uint[HASH_TABLE_SIZE * HASH_MAX_PER_CELL]
+  private Rid _hashCountsBuffer; // HASH_COUNTS_BUFFER_SIZE bytes
+  private Rid _hashEntriesBuffer; // HASH_ENTRIES_BUFFER_SIZE bytes
   private byte[] _hashPushBytes;
 
   // Push constant layout for spatial_hash_build.glsl (4 × float/uint = 16 bytes)
@@ -268,9 +276,9 @@ public sealed partial class SquadMultiMeshInstance3D : MultiMeshInstance3D
   private Action<Vector3> _dropBombAction;
   private bool _showStateLabels;
 
-  public const int BODY_STRIDE = 28; // floats per body (used only for GPU size calculations)
+  public const int BODY_STRIDE = 30; // floats per body (used only for GPU size calculations)
 
-  // ⚠ KEEP IN SYNC — 28 floats, identical field order in all four copies:
+  // ⚠ KEEP IN SYNC — 30 floats, identical field order in all four copies:
   //   compute_shaders/physics_compute.glsl
   //   compute_shaders/spatial_hash_build.glsl
   //   compute_shaders/projectile_compute.glsl
@@ -287,28 +295,33 @@ public sealed partial class SquadMultiMeshInstance3D : MultiMeshInstance3D
     public float Radius;
     public float Mass;
     public float FacingAngle;
-    public float Pad7; // spare — was WanderAngle, now a per-frame local in physics_compute.glsl
     public float Health;
     public float LastHitTime;
     public float BombOriginX;
     public float BombOriginY;
     public float DamagedTime;
-    public uint State;
     public uint DamageAccum;
-
-    // Absolute time (x256) at which the contagion lapses, not a remaining duration.
-    // Raised by atomicMax in projectile_compute / physics_compute and never decremented.
-    public uint ContagionExpiryU;
-    public uint DpsRateU;
     public uint BodyFlags;
+
+    // GLSL `uint contagion_expiry_u[3]`: per contagion type (fire, poison, drunk), the
+    // absolute time (x256) at which it lapses — not a remaining duration. Raised by atomicMax
+    // in projectile_compute / physics_compute and never decremented.
+    public uint FireExpiryU;
+    public uint PoisonExpiryU;
+    public uint DrunkExpiryU;
+
+    // GLSL `uint contagion_dps_u[3]`: per contagion type, damage per second (x256).
+    public uint FireDpsU;
+    public uint PoisonDpsU;
+    public uint DrunkDpsU;
     public float TeleportX;
     public float TeleportZ;
+    public float TeleportY;
     public int ImpulseX;
     public int ImpulseZ;
     public int ImpulseY;
-    public float TeleportY;
     public float SpeedEma; // written by physics_compute.glsl only, unused here
-    public float Pad3;
+    public float Pad29; // keeps the size a multiple of 8 bytes, matching std430's stride
   }
 
   public const int INSTANCE_STRIDE = 20; // 12 transform + 4 color + 4 custom
@@ -435,7 +448,7 @@ public sealed partial class SquadMultiMeshInstance3D : MultiMeshInstance3D
   public const int PROJ_PUSH_TIME = 6;
   public const int PROJ_PUSH_SIZE = 8 * sizeof(float); // 8 slots
 
-  // Physics push-constant slots  (PHYSICS_PUSH_SIZE = 14 × sizeof(float))
+  // Physics push-constant slots  (PHYSICS_PUSH_SIZE = 18 × sizeof(float))
   public const int PHYS_PUSH_DELTA_TIME = 0; // float delta_time
   public const int PHYS_PUSH_NUM_BODIES = 1; // int   num_bodies
   public const int PHYS_PUSH_TARGET_X = 2; // float target.x  (world X)
@@ -450,6 +463,10 @@ public sealed partial class SquadMultiMeshInstance3D : MultiMeshInstance3D
   public const int PHYS_PUSH_Y_OFFSET = 11; // float y_offset
   public const int PHYS_PUSH_FRAME_STAMP = 12; // uint  frame_stamp (see HASH_STAMP_MASK)
   public const int PHYS_PUSH_HOG_GRAVITY_SCALE = 13; // float hog_gravity_scale
+  public const int PHYS_PUSH_FOOTPRINT_MIN_X = 14; // vec2  footprint_min (x = right)
+  public const int PHYS_PUSH_FOOTPRINT_MIN_Z = 15; //                    (y = forward)
+  public const int PHYS_PUSH_FOOTPRINT_MAX_X = 16; // vec2  footprint_max
+  public const int PHYS_PUSH_FOOTPRINT_MAX_Z = 17;
 
   private int _numObstacles;
   private uint _obstacleBufferSize;
@@ -457,6 +474,12 @@ public sealed partial class SquadMultiMeshInstance3D : MultiMeshInstance3D
   private Node _global;
   private float _targetMarkerYOffset;
   private int _bodyCapacity;
+
+  // XZ bounds of the mesh the hogs are drawn with, in the hog's own frame (X = right,
+  // Y = forward). physics_compute keeps this box out of walls — BodyRadius is only the
+  // spacing between hogs, and far smaller than what is drawn. Measured in SetupMultiMesh.
+  private Vector2 _hogFootprintMin;
+  private Vector2 _hogFootprintMax;
 
   // Obstacle shape caches — avoid traversing the node tree every frame
   private List<CollisionShape3D> _staticShapes;
@@ -490,6 +513,12 @@ public sealed partial class SquadMultiMeshInstance3D : MultiMeshInstance3D
   // Scratch set reused for per-zone occupant tracking (zero per-frame allocation).
   private HashSet<int> _zoneOccupantsScratch = [];
 
+  // Trigger-zone damage summed per hog over one ProcessTriggerZones pass, then written once
+  // per hog by FlushZoneDamage. damage_accum is a plain GPU word that a CPU write replaces,
+  // so writing each zone's damage straight away kept only the last of two zones a hog
+  // entered in the same frame. Cleared, never reallocated, so steady state is zero-alloc.
+  private readonly Dictionary<int, float> _pendingZoneDamage = [];
+
   // Two pre-allocated dicts swapped each frame — no per-frame allocation for movable obstacles
   private Dictionary<CollisionShape3D, (Vector2 center, float yRot)> _prevObstacleState = [];
   private Dictionary<CollisionShape3D, (Vector2 center, float yRot)> _currentObstacleState = [];
@@ -509,7 +538,7 @@ public sealed partial class SquadMultiMeshInstance3D : MultiMeshInstance3D
   )> _labelCandidates = [];
 
   // --- Pre-allocated staging buffers (zero per-frame heap allocations) ---
-  public const int PHYSICS_PUSH_SIZE = 14 * sizeof(float); // 14 push constants
+  public const int PHYSICS_PUSH_SIZE = 18 * sizeof(float); // 18 push constants
 
   private byte[] _physicsPushBytes;
   private float[] _bombStaging; // MAX_BOMBS * BOMB_STRIDE, reused every frame
@@ -735,9 +764,10 @@ public sealed partial class SquadMultiMeshInstance3D : MultiMeshInstance3D
     if (_hashFrameStamp == 0)
     {
       // The stamp just wrapped, so a bucket last written exactly 65536 frames ago would carry
-      // the current stamp and read as valid with its old contents. Zero every bucket word
-      // before the next build so none can. Leaves the overflow counter past the table alone.
-      EnqueueGpuClear(GpuTarget.HashCounts, 0, HASH_TABLE_SIZE * sizeof(uint));
+      // the current stamp and read as valid with its old contents. Zero every bucket word —
+      // the grid's and the airborne bucket's — before the next build so none can. Leaves the
+      // overflow counter after them alone.
+      EnqueueGpuClear(GpuTarget.HashCounts, 0, (HASH_TABLE_SIZE + 1) * sizeof(uint));
     }
 
     if (DebugHashOverflow)
@@ -845,7 +875,6 @@ public sealed partial class SquadMultiMeshInstance3D : MultiMeshInstance3D
         BombOriginX = 0.0f,
         BombOriginY = 0.0f,
         DamagedTime = 0.0f,
-        State = 0,
       };
     }
 
