@@ -97,6 +97,11 @@ enum ForwardAxis {
 
 @export_storage var _editor_transform: Transform3D
 
+## World direction to face instead of the target, while non-zero — e.g. the launch direction
+## of a lobbed shot. The usual smoothing, weights and limits still apply, so the parent turns
+## into the override and back out of it. Set to ZERO to resume tracking the target.
+var aim_direction_override: Vector3 = Vector3.ZERO
+
 # ---- Runtime state ----
 var _parent: Node3D
 var _current_euler: Vector3 = Vector3.ZERO
@@ -141,7 +146,11 @@ func _process(delta: float) -> void:
   _prev_raw_target = raw_target
 
   # ---- Desired look rotation ----
+  # The target is still sampled above while overridden, so prediction does not see a jump
+  # when tracking resumes.
   var to_dir := (tracked_pos - _parent.global_position).normalized()
+  if aim_direction_override != Vector3.ZERO:
+    to_dir = aim_direction_override.normalized()
   if to_dir.length_squared() < 0.0001:
     return
   var desired_euler := _look_euler(to_dir)

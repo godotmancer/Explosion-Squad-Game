@@ -482,6 +482,18 @@ itself (the mortar) is fired unchanged.
 The fire actions match with Shift held because Godot matches actions non-exactly by default
 (modifiers ignored). The camera's own Shift use is pan-while-orbit-dragging only.
 
+While a lobbed shot is being fired — Shift or the mortar key held — the HeadHog also pitches up
+to its launch angle, like a mortar barrel: `lob_angle_deg` for Shift, the mortar's own
+`launch_angle_deg` whenever its key is held (it flies at that angle with or without Shift; see
+`Main._head_lob_angle_deg`). `Main._aim_head` sets `LookAtTracker.aim_direction_override` on
+the head's tracker (`Main.head_tracker`) to that launch direction — horizontally toward the
+mouse point, raised by the angle — and clears it to `Vector3.ZERO` on release. The tracker is not
+disabled: an override only replaces the direction it turns toward, so its speed, easing and
+weights carry the head into the pitch and back out of it (~0.4 s each way at the defaults). The
+muzzle marker rides on the head, so it rises about 0.6 m while lobbing; the lob solver aims from
+wherever it is, and the shells still land on the aim point. The shot always leaves at the lob
+angle, even in the first few frames while the head is still turning up to it.
+
 ### Kill path (GPU-initiated)
 
 ```
