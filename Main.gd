@@ -11,6 +11,11 @@ extends Node3D
 ## elevation and gravity, instead of firing it straight. Defaults match the mortar.
 @export_range(1.0, 89.0) var lob_angle_deg := 55.0
 @export var lob_gravity_scale := 2.5
+## Tracker turning the head hog toward the mouse. While a lobbed shot is being fired — the lob
+## modifier or the mortar key held — it is pointed along the shot's launch direction instead,
+## toward the target and raised by the shot's launch angle, so the head tilts up like a mortar
+## barrel.
+@export var head_tracker : LookAtTracker
 
 
 var projectile_bullet_ability := preload("res://projectiles/BulletProjectile.tres")
@@ -34,6 +39,7 @@ func _ready():
 func _physics_process(delta: float) -> void:
   _time += delta
   var lob := Input.is_action_pressed("lob_modifier")
+  _aim_head(_head_lob_angle_deg(lob))
 
   if Input.is_action_pressed("spawn_projectile") and _ready_to_fire(projectile_bullet_ability):
     spawn_projectile(_as_fired(projectile_bullet_ability, lob))
@@ -73,6 +79,34 @@ func _as_fired(ability: ProjectileAbility, lob: bool) -> ProjectileAbility:
     _make_lobbed(lobbed)
     _lobbed[ability] = lobbed
   return lobbed
+
+
+## Launch angle of the lobbed shot being fired, for the head to show — or 0 when nothing is
+## being lobbed. The mortar key wins over the lob modifier: the mortar always flies at its own
+## angle, even with Shift held (see [method _as_fired]).
+func _head_lob_angle_deg(lob: bool) -> float:
+  if Input.is_action_pressed("spawn_mortar"):
+    return projectile_mortar_ability.launch_angle_deg
+  if lob:
+    return lob_angle_deg
+  return 0.0
+
+
+## Points the head hog along a lobbed shot's launch direction — horizontally toward the mouse
+## point, raised by [param angle_deg] — or, when that is 0, hands it back to target tracking.
+func _aim_head(angle_deg: float) -> void:
+  if head_tracker == null:
+    return
+  if angle_deg <= 0.0:
+    head_tracker.aim_direction_override = Vector3.ZERO
+    return
+  var head := head_tracker.get_parent() as Node3D
+  var flat := mouse_global_pos.global_position - head.global_position
+  flat.y = 0.0
+  if flat.length_squared() < 0.0001:
+    return # target straight below: keep the last lob direction
+  var angle := deg_to_rad(angle_deg)
+  head_tracker.aim_direction_override = flat.normalized() * cos(angle) + Vector3.UP * sin(angle)
 
 
 ## Turns [param ability] into a lob: launched at lob_angle_deg under lob_gravity_scale, with

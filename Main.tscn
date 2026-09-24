@@ -263,13 +263,14 @@ outer_radius = 0.5
 rings = 36
 ring_segments = 8
 
-[node name="Main" type="Node3D" unique_id=719818601 node_paths=PackedStringArray("projectile_spawner", "mouse_global_pos", "projectile_spawn_marker", "teleport_marker")]
+[node name="Main" type="Node3D" unique_id=719818601 node_paths=PackedStringArray("projectile_spawner", "mouse_global_pos", "projectile_spawn_marker", "teleport_marker", "head_tracker")]
 script = ExtResource("1_hhcpw")
 projectile_spawner = NodePath("ProjectileSpawner")
 mouse_global_pos = NodePath("MouseTargetLocation")
 projectile_spawn_marker = NodePath("TargetMarker/HeadHogAnchor/HeadHog/HogsSquadsMesh/HeadHogProjectileMarker")
 projectile_scn = ExtResource("2_mxvw5")
 teleport_marker = NodePath("TeleportMarker")
+head_tracker = NodePath("TargetMarker/HeadHogAnchor/HeadHog/LookAtTracker")
 
 [node name="SpawnPoint" type="Marker3D" parent="." unique_id=1782845654]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 19.071808, 15.788399, 81.185196)
