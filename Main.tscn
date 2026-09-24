@@ -93,7 +93,7 @@ albedo_color = Color(0, 1.382, 1.64, 1)
 height = 0.5
 
 [sub_resource type="BoxShape3D" id="BoxShape3D_db7pu"]
-size = Vector3(9.182129, 1, 1.5401611)
+size = Vector3(9.699249, 1, 1.8116608)
 
 [sub_resource type="StandardMaterial3D" id="StandardMaterial3D_kg8qs"]
 albedo_color = Color(0.6943995, 0.016302751, 0.5408173, 1)
@@ -374,7 +374,7 @@ metadata/_custom_type_script = "uid://h8rsffid2vbl"
 metadata/_edit_group_ = true
 
 [node name="CollisionShape3D" type="CollisionShape3D" parent="Obstacles/Static/EnclosureWall2" unique_id=360432665]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -0.0091609955, 0, 0.026062012)
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.112724304, 0, -0.023612976)
 shape = SubResource("BoxShape3D_db7pu")
 
 [node name="MeshInstance3D" type="MeshInstance3D" parent="Obstacles/Static/EnclosureWall2" unique_id=1023146281]
@@ -390,7 +390,7 @@ metadata/_custom_type_script = "uid://h8rsffid2vbl"
 metadata/_edit_group_ = true
 
 [node name="CollisionShape3D" type="CollisionShape3D" parent="Obstacles/Static/EnclosureWall5" unique_id=2029209087]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -0.0091609955, 0, 0.026062012)
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.007425308, 0, -0.0046310425)
 shape = SubResource("BoxShape3D_db7pu")
 
 [node name="MeshInstance3D" type="MeshInstance3D" parent="Obstacles/Static/EnclosureWall5" unique_id=1997081200]
