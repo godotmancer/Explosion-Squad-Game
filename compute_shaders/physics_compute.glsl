@@ -18,7 +18,8 @@ struct Body {
     float radius;
     float mass;
     float facing_angle;
-    float wander_angle;
+    float pad7;               // 7   spare — was wander_angle, which is rebuilt from scratch
+                              //     every frame and so is now a local in main()
     float health;
     float last_hit_time;
     float bomb_origin_x;
@@ -34,7 +35,7 @@ struct Body {
                               //     against `time` rather than a read-modify-write that
                               //     concurrent spreaders could lose.
     uint  dps_rate_u;         // 18  contagion DPS × 256 (atomicMax)
-    uint  body_flags;         // 19  BODY_FLAG_TELEPORT | BODY_FLAG_HIT_FRAME
+    uint  body_flags;         // 19  BODY_FLAG_TELEPORT
     float teleport_x;         // 20
     float teleport_z;         // 21
     int   impulse_x;          // 22  knockback impulse X × 1000 (atomicAdd)
@@ -47,15 +48,12 @@ struct Body {
     float pad3;               // 27
 };
 
-const uint OBSTACLE_CIRCLE = 0u;
-const uint OBSTACLE_OBB = 1u;
-
 struct Obstacle {
     vec2 center;
     vec2 half_extents;
     vec2 local_x_axis;
     vec2 velocity;
-    float type;
+    float type;         // < 0.5 circle, otherwise OBB (OBS_TYPE_* in C#)
     float margin;
     float angular_vel;
     float pad;
@@ -66,12 +64,17 @@ struct Bomb {
     float force;
     float radius;
     float damage;
-    float _pad1;
+    float causes_fear;  // 1.0 for a real bomb; 0.0 for the death-fear nudge C# adds when a hog dies
     float _pad2;
     float _pad3;
 };
 
-layout(set = 0, binding = 0, std430) coherent restrict buffer  BodiesBuffer    { Body     bodies[];    };
+// Deliberately NOT `coherent`. Atomics are device-scope with or without it, and every plain
+// read of another body (the neighbour scan) already accepts that body's value from either
+// side of its own update this frame. What the qualifier did cost: on Metal it becomes
+// `coherent device` (MSL 3.2+) or `volatile device` (older), so every neighbour load skips
+// the cache and cannot be trimmed to the fields actually used. See AGENTS.md §14.
+layout(set = 0, binding = 0, std430) restrict buffer          BodiesBuffer    { Body     bodies[];    };
 layout(set = 0, binding = 1, std430) restrict readonly buffer ObstaclesBuffer { Obstacle obstacles[]; };
 layout(set = 0, binding = 2, std430) restrict readonly buffer BombsBuffer     { Bomb     bombs[];     };
 // Spatial hash table written by spatial_hash_build.glsl each frame before this shader runs.
@@ -96,7 +99,8 @@ layout(push_constant, std430) uniform Params {
     float bomb_fear_duration;
     float gravity;
     float y_offset;
-    uint  frame_parity;  // matches spatial_hash_build.glsl — used to skip stale buckets
+    uint  frame_stamp;   // frame index mod 65536, as given to spatial_hash_build.glsl — buckets
+                         // carrying any other stamp are stale
     float hog_gravity_scale;
 };
 
@@ -253,11 +257,17 @@ const float DRUNK_FEAR_STRENGTH = 0.4;  // peak fear radiated, on the same 0-1 s
                                         // before the per-hop decay puts it outside that window;
                                         // below ~0.31 the fear stops at the neighbours the drunk
                                         // hog can reach directly.
-const float DRUNK_FEAR_FADE     = 15.0; // seconds of remaining drunkenness over which the radiated
+const float DRUNK_FEAR_FADE     = 1.0; // seconds of remaining drunkenness over which the radiated
                                         // fear ramps down to nothing. Shorter than the 50s
                                         // contagion_duration on DrunkProjectile.tres, so most of a
                                         // drunk hog's life radiates full-strength fear and only the
                                         // tail winds down.
+
+// The most fear a neighbour can hand over: a bomb-panicked hog relays at most full fear (1.0),
+// a drunk one DRUNK_FEAR_STRENGTH, and either is scaled by FEAR_CONTAGION_DECAY. A hog whose
+// own fear is already at least this minus FEAR_SPREAD_THRESHOLD cannot be made more afraid by
+// the neighbour scan, so it skips the fear checks and the wide ring (see can_gain_fear in main).
+const float FEAR_MAX_SPREAD = FEAR_CONTAGION_DECAY * max(1.0, DRUNK_FEAR_STRENGTH);
 
 // Thresholds used when computing state bits — kept here so C# only needs to
 // read the pre-computed state, not re-derive it from raw values.
@@ -293,7 +303,6 @@ const uint CONTAGION_MASK  = STATE_ON_FIRE | STATE_POISONED | STATE_DRUNK;
 
 // Body flag bits (body_flags field)
 const uint BODY_FLAG_TELEPORT  = 1u;
-const uint BODY_FLAG_HIT_FRAME = 2u;
 
 // Fixed-point scale factors
 const float DAMAGE_SCALE    = 256.0;
@@ -355,24 +364,37 @@ vec2 rotate2d(vec2 v, float angle) {
     return vec2(v.x * c - v.y * s, v.x * s + v.y * c);
 }
 
+// Falls smoothly from 1 at `lo` to 0 at `hi` (lo < hi). The reversed-edge form
+// smoothstep(hi, lo, x) says the same thing, but GLSL and MSL both leave
+// edge0 >= edge1 undefined, so this is the spec-safe spelling of it.
+float smooth_fall(float lo, float hi, float x) {
+    return 1.0 - smoothstep(lo, hi, x);
+}
+
 // =============================================================================
 // SPATIAL HASH  (matches spatial_hash_build.glsl — keep constants in sync)
 // =============================================================================
-const uint  HASH_TABLE_SIZE   = 32768u; // MUST be a power of two — spatial_hash masks with (size - 1)
-                                        // Sized for ~2x occupied cells at 20k bodies; see the
-                                        // sizing note in spatial_hash_build.glsl. Oversizing is
-                                        // free at runtime, so this does not scale with body count.
+const uint  HASH_TABLE_SIZE   = 32768u; // == HASH_GRID_W * HASH_GRID_H; see the sizing note in
+                                        // spatial_hash_build.glsl. Oversizing is free at
+                                        // runtime, so this does not scale with body count.
+const uint  HASH_GRID_W       = 256u;   // cells along x before the grid wraps (power of two)
+const uint  HASH_GRID_H       = HASH_TABLE_SIZE / HASH_GRID_W; // along z: 128 (power of two)
 const uint  HASH_MAX_PER_CELL = 64u;
 const float HASH_CELL_SIZE    = 2.0;  // world units per cell edge — kept small on purpose so
                                        // densely packed crowds stay below HASH_MAX_PER_CELL.
                                        // Guaranteed coverage: 3×3 scan ≥ 2.0u, 5×5 scan ≥ 4.0u;
                                        // larger query radii are approximate (see main()).
+// Bucket word layout: frame stamp in the high 16 bits, entry count in the low 16.
+const uint  HASH_STAMP_SHIFT  = 16u;
+const uint  HASH_COUNT_MASK   = 0xFFFFu;
 
-// Map 2-D integer cell coords to a bucket index — identical to spatial_hash_build.glsl.
+// Map 2-D integer cell coords to a bucket — identical in all three shaders. A wrap-around
+// grid rather than a hash: two cells share a bucket only when they are a whole grid apart
+// (512 m in x, 256 m in z), so no scan window ever holds two cells of one bucket and the
+// HASH_MAX_PER_CELL capacity really is per cell. uint() keeps the two's-complement bits, so
+// negative cells wrap as well.
 uint spatial_hash(int cx, int cz) {
-    uint hx = uint(cx) * 2654435761u;
-    uint hz = uint(cz) * 2246822519u;
-    return (hx ^ hz) & (HASH_TABLE_SIZE - 1u);
+    return (uint(cx) & (HASH_GRID_W - 1u)) + (uint(cz) & (HASH_GRID_H - 1u)) * HASH_GRID_W;
 }
 
 // Given an obstacle, compute the signed distance from pos to its padded surface
@@ -436,23 +458,22 @@ void mark_damaged(inout Body b) {
     b.damaged_time  = time + DAMAGED_DISPLAY_DURATION;
 }
 
-// Probabilistically pass a contagion (fire/poison) to neighbour `i`.
-// The neighbour receives a FRACTION of our remaining time (CONTAGION_SPREAD_DECAY), capped
-// at max_duration, so each hop is strictly weaker than its infector and the outbreak dies
-// out on its own. DPS is inherited at full strength; only the window shrinks.
-void try_spread_contagion(int i, uint flag, float max_duration, float prob,
-                          uint rnd_seed, uint self_expiry, uint self_dps) {
+// The expiry a neighbour inherits when we infect it. It gets a FRACTION of our remaining
+// time (CONTAGION_SPREAD_DECAY), capped at max_duration, so each hop is strictly weaker
+// than its infector and the outbreak dies out on its own. Returns 0 — spread nothing — once
+// that window falls below CONTAGION_MIN_SPREAD_DUR, the floor that ends the chain.
+uint child_contagion_expiry(float self_remaining, float max_duration, uint now_u) {
+    float child_duration = min(self_remaining * CONTAGION_SPREAD_DECAY, max_duration);
+    if (child_duration < CONTAGION_MIN_SPREAD_DUR) return 0u;
+    return now_u + uint(child_duration * CONT_TIME_SCALE);
+}
+
+// Probabilistically pass a contagion (fire/poison) to neighbour `i`, expiring at
+// new_expiry (from child_contagion_expiry). DPS is inherited at full strength; only the
+// window shrinks.
+void try_spread_contagion(int i, uint flag, uint new_expiry, uint self_dps,
+                          float prob, uint rnd_seed, uint now_u) {
     if (hash(rnd_seed) >= prob) return;
-
-    uint now_u = uint(time * CONT_TIME_SCALE);
-    if (self_expiry <= now_u) return; // our own contagion lapsed; nothing left to pass on
-
-    // Guarded above, so this subtraction cannot wrap.
-    float self_remaining  = float(self_expiry - now_u) / CONT_TIME_SCALE;
-    float child_duration  = min(self_remaining * CONTAGION_SPREAD_DECAY, max_duration);
-    if (child_duration < CONTAGION_MIN_SPREAD_DUR) return;
-
-    uint new_expiry = now_u + uint(child_duration * CONT_TIME_SCALE);
 
     // Raise the expiry FIRST and keep atomicMax's return value. Whichever thread lifts a
     // lapsed expiry into the future is the unambiguous first infector, and only that thread
@@ -491,14 +512,10 @@ void main() {
         return;
     }
 
-    // Seed the wander angle on first use (avoids every body starting in sync)
-    if (self.wander_angle == 0.0) {
-        self.wander_angle = (hash(id) * 2.0 - 1.0) * WANDER_STRENGTH;
-    }
-
     vec2  to_target      = target - self.position;
     float dist_to_target = length(to_target);
     vec2  target_dir     = dist_to_target > NEAR_ZERO_DIST ? to_target / dist_to_target : vec2(0.0);
+    float arrive_t       = clamp(dist_to_target / arrive_radius, 0.0, 1.0); // 0 at the target, 1 from arrive_radius out
 
     // Body is "airborne" when its height is meaningfully above the ground plane
     bool is_falling = self.height > y_offset + GROUND_EPSILON;
@@ -521,8 +538,14 @@ void main() {
     // =========================================================================
     // BOMB IMPULSE + DAMAGE
     // =========================================================================
+    // A real bomb anywhere in the buffer widens the neighbour scan below (see `ring`) so its
+    // panic can spread. The death-fear nudges C# adds whenever a hog dies cause no fear, so
+    // they must not: during an outbreak hogs die every few frames, and counting the nudges
+    // kept the whole crowd on the 25-bucket scan for nothing.
+    bool fear_bomb_live = false;
     for (int bi = 0; bi < num_bombs; bi++) {
         Bomb bomb       = bombs[bi];
+        fear_bomb_live  = fear_bomb_live || bomb.causes_fear > 0.5;
         vec2 to_hog  = self.position - bomb.pos;
         float dist_bomb = length(to_hog);
 
@@ -584,10 +607,12 @@ void main() {
     }
 
     // --- Knockback impulse ---
-    float imp_x = float(self.impulse_x) / IMPULSE_SCALE;
-    float imp_z = float(self.impulse_z) / IMPULSE_SCALE;
-    float imp_y = float(self.impulse_y) / IMPULSE_SCALE;
-    if (abs(imp_x) > 0.001 || abs(imp_z) > 0.001 || abs(imp_y) > 0.001) {
+    // Tested on the raw fixed-point ints: exact, and no float compare that quietly
+    // dropped impulses of ±1 unit.
+    if ((self.impulse_x | self.impulse_z | self.impulse_y) != 0) {
+        float imp_x = float(self.impulse_x) / IMPULSE_SCALE;
+        float imp_z = float(self.impulse_z) / IMPULSE_SCALE;
+        float imp_y = float(self.impulse_y) / IMPULSE_SCALE;
         self.velocity          += vec2(imp_x, imp_z);
         self.vertical_velocity += imp_y;
         if (imp_y > 0.1) {
@@ -598,9 +623,6 @@ void main() {
     self.impulse_x = 0;
     self.impulse_z = 0;
     self.impulse_y = 0;
-
-    // --- Clear per-frame hit marker ---
-    self.body_flags &= ~BODY_FLAG_HIT_FRAME;
 
     // --- Drunk jitter ---
     if ((self.state & STATE_DRUNK) != 0u && cont_active) {
@@ -624,12 +646,32 @@ void main() {
 
     float closest_neighbor_dist = 9999.0; // Track nearest neighbor for sprint speed logic
 
-    // Loop-invariant: only a body whose contagion is still live may pass it on. Gating on
-    // cont_active as well as the bit matters because the bits in bodies[].state are cleared
-    // one frame later than the expiry lapses, so a bit-only test would let a burnt-out hog
-    // keep igniting its neighbours.
-    bool spreads_fire   = cont_active && (self.state & STATE_ON_FIRE)  != 0u;
-    bool spreads_poison = cont_active && (self.state & STATE_POISONED) != 0u;
+    // Our own fear on the linear 1 → 0 scale that the spread test below compares against
+    // (fear_factor is its square). No neighbour can hand over more than FEAR_MAX_SPREAD, so a
+    // hog already that afraid — typically for a few seconds after a real hit — cannot have
+    // its fear changed by the scan, and skips the fear checks and the wide ring outright.
+    float self_fear     = fear_factor > 0.0 ? (1.0 - time_t) : 0.0;
+    bool  can_gain_fear = bomb_fear_duration > 0.0
+                       && FEAR_MAX_SPREAD > self_fear + FEAR_SPREAD_THRESHOLD;
+
+    // What each contagion type would hand a neighbour. It depends only on this body, so it is
+    // worked out once here rather than per neighbour. Zero means nothing to pass on: either
+    // the contagion is not live — gated on the expiry, since the type bits are sticky past it
+    // (see the writeback comment at the end of main), so a bit-only test would let a
+    // burnt-out hog keep igniting its neighbours — or the inherited window would fall below
+    // the spread floor.
+    uint fire_child_expiry   = 0u;
+    uint poison_child_expiry = 0u;
+    if (cont_active) {
+        // cont_active guarantees the expiry is in the future, so this cannot wrap.
+        float self_remaining = float(self.contagion_expiry_u - now_u) / CONT_TIME_SCALE;
+        if ((self.state & STATE_ON_FIRE) != 0u)
+            fire_child_expiry = child_contagion_expiry(self_remaining, FIRE_SPREAD_MAX_DUR, now_u);
+        if ((self.state & STATE_POISONED) != 0u)
+            poison_child_expiry = child_contagion_expiry(self_remaining, POISON_SPREAD_MAX_DUR, now_u);
+    }
+    bool spreads_fire   = fire_child_expiry   != 0u;
+    bool spreads_poison = poison_child_expiry != 0u;
 
     if (!is_falling) {
         // =====================================================================
@@ -654,102 +696,105 @@ void main() {
         //     and fear travels farther by relaying through intermediate hogs
         //     over several frames.
         //
-        // Hash collisions (different real-world cells mapping to the same bucket)
-        // add false-positive candidates.  Every behavior already has an exact
-        // distance check, so correctness is guaranteed regardless of collisions —
-        // they only cost a few extra distance computations.
+        // The table is a wrap-around grid (see spatial_hash), so no two cells in
+        // this window share a bucket. Cells a whole grid apart (512 m / 256 m) do,
+        // and every behavior already has an exact distance check that rejects them.
         // =====================================================================
 
         int self_cx = int(floor(self.position.x / HASH_CELL_SIZE));
         int self_cz = int(floor(self.position.y / HASH_CELL_SIZE));
 
         // The outer 5×5 ring exists solely for fear contagion, so scan it only when
-        // fear can actually change this frame: a live bomb is in the buffer, or this
-        // body is still inside its own fear window. Otherwise 3×3 is enough and the
-        // bucket count per body drops from 25 to 9.
+        // fear can actually change this frame: this body can still gain fear, and
+        // either a real bomb is live or it is inside its own fear window. Otherwise
+        // 3×3 is enough and the bucket count per body drops from 25 to 9.
         //
         // Gate on fear_factor, not last_hit_time: last_hit_time is never reset, so
         // once a body has been hit even a single time it would scan the wide ring
         // forever and the saving would decay away as the crowd takes damage.
-        int ring = (bomb_fear_duration > 0.0 && (num_bombs > 0 || fear_factor > 0.0)) ? 2 : 1;
+        int ring = (can_gain_fear && (fear_bomb_live || fear_factor > 0.0)) ? 2 : 1;
 
-        for (int dcx = -ring; dcx <= ring; dcx++) {
-            for (int dcz = -ring; dcz <= ring; dcz++) {
+        // x innermost: the grid puts a row of cells in adjacent buckets, so
+        // consecutive iterations read neighbouring hash_counts words.
+        for (int dcz = -ring; dcz <= ring; dcz++) {
+            for (int dcx = -ring; dcx <= ring; dcx++) {
 
                 bool inner = (abs(dcx) <= 1 && abs(dcz) <= 1);
 
                 uint bucket      = spatial_hash(self_cx + dcx, self_cz + dcz);
                 uint stored      = hash_counts[bucket];
-                // Skip buckets written by a previous frame (parity mismatch).
-                // This is the fallback guard when the pipeline barrier between the
-                // hash-build and physics dispatches is imperfect (e.g. on Metal).
-                if ((stored >> 31u) != frame_parity) continue;
-                uint count = min(stored & 0x7FFFFFFFu, HASH_MAX_PER_CELL);
+                // Skip buckets not written this frame (stamp mismatch) — that is how
+                // the build invalidates old contents without a clear pass.
+                if ((stored >> HASH_STAMP_SHIFT) != frame_stamp) continue;
+                uint count = min(stored & HASH_COUNT_MASK, HASH_MAX_PER_CELL);
 
                 for (uint k = 0u; k < count; k++) {
                     int i = int(hash_entries[bucket * HASH_MAX_PER_CELL + k]);
                     if (i == int(id)) continue;
 
-                    // Load every neighbour field this iteration needs exactly once.
-                    // BodiesBuffer is `coherent` and this loop writes it through
-                    // try_spread_contagion, so each re-index of bodies[i] is an
-                    // uncached memory round trip the driver is not free to fold away.
-                    float n_health = bodies[i].health;
-                    float n_height = bodies[i].height;
+                    // Snapshot once. BodiesBuffer is not `coherent`, so these are
+                    // ordinary cacheable loads and the compiler is free to fetch only
+                    // the fields used below. The atomics in try_spread_contagion run
+                    // after this load, so a register copy is correct.
+                    Body n = bodies[i];
 
                     // Re-check aliveness here: a body could have died between
                     // the hash build pass and this pass (same frame, same Sync).
-                    if (n_health <= 0.0 || n_height > y_offset + GROUND_EPSILON) continue;
+                    if (n.health <= 0.0 || n.height > y_offset + GROUND_EPSILON) continue;
 
-                    vec2  n_position = bodies[i].position;
-                    vec2  diff = self.position - n_position;
-                    float dist = length(diff);
-                    if (dist < NEAR_ZERO) continue;
+                    vec2  diff  = self.position - n.position;
+                    float dist2 = dot(diff, diff);
+                    if (dist2 < NEAR_ZERO * NEAR_ZERO) continue;
 
                     // ---- Fear contagion: both inner and outer rings (up to 20u) ----
-                    if (dist < FEAR_CONTAGION_RADIUS && bomb_fear_duration > 0.0) {
-                        float n_last_hit = bodies[i].last_hit_time;
-                        float n_time     = time - n_last_hit;
+                    // Outer ring never needs `dist` — squared compare only.
+                    if (can_gain_fear
+                        && dist2 < FEAR_CONTAGION_RADIUS * FEAR_CONTAGION_RADIUS) {
+                        float n_time = time - n.last_hit_time;
                         // Only spread from neighbors still actively afraid (within early window)
-                        if (n_last_hit > 0.0 && n_time >= 0.0
+                        if (n.last_hit_time > 0.0 && n_time >= 0.0
                             && n_time < bomb_fear_duration * FEAR_CONTAGION_WINDOW) {
                             float n_fear = 1.0 - (n_time / bomb_fear_duration);
                             if (n_fear > best_contagion_fear) {
                                 best_contagion_fear   = n_fear;
-                                contagion_bomb_origin = vec2(bodies[i].bomb_origin_x, bodies[i].bomb_origin_y);
+                                contagion_bomb_origin = vec2(n.bomb_origin_x, n.bomb_origin_y);
                             }
                         }
                     }
 
                     // Inner 3×3 only: boid forces and overlap (all within CELL_SIZE = 10u)
                     if (inner) {
+                        // One inversesqrt for the unit vector and `dist`. Outer-ring
+                        // candidates never enter here, so they never pay a sqrt.
+                        float inv_dist = inversesqrt(dist2);
+                        float dist     = dist2 * inv_dist;
                         closest_neighbor_dist = min(closest_neighbor_dist, dist);
 
-                        float comb_radius = self.radius + bodies[i].radius;
+                        float comb_radius = self.radius + n.radius;
 
                         // ---- Separation: quadratic repulsion within personal-space bubble ----
                         float sep_radius = comb_radius * SEPARATION_PADDING;
-                        if (dist < sep_radius) {
+                        if (dist2 < sep_radius * sep_radius) {
                             float norm_dist = dist / sep_radius;
-                            separation += (diff / dist) * (1.0 - norm_dist) * (1.0 - norm_dist);
+                            separation += diff * inv_dist * (1.0 - norm_dist) * (1.0 - norm_dist);
                             sep_count++;
                         }
 
                         // ---- Alignment: match heading of nearby neighbors ----
-                        if (dist < ALIGNMENT_RADIUS) {
-                            avg_velocity += bodies[i].velocity;
+                        if (dist2 < ALIGNMENT_RADIUS * ALIGNMENT_RADIUS) {
+                            avg_velocity += n.velocity;
                             align_count++;
                         }
 
                         // ---- Cohesion: steer toward local crowd center ----
-                        if (dist < COHESION_RADIUS) {
-                            avg_position += n_position;
+                        if (dist2 < COHESION_RADIUS * COHESION_RADIUS) {
+                            avg_position += n.position;
                             cohesion_count++;
                         }
 
                         // ---- Hard overlap correction: resolve actual body interpenetration ----
-                        if (dist < comb_radius) {
-                            overlap_correction += (diff / dist) * (comb_radius - dist) * OVERLAP_CORRECTION_FACTOR;
+                        if (dist2 < comb_radius * comb_radius) {
+                            overlap_correction += diff * inv_dist * (comb_radius - dist) * OVERLAP_CORRECTION_FACTOR;
                         }
 
                         // ---- Drunk fear: a staggering hog unsettles the hogs right next to it ----
@@ -758,43 +803,39 @@ void main() {
                         // two stay close. Inner ring only — DRUNK_FEAR_RADIUS sits inside the 3×3's
                         // guaranteed coverage, so it does not depend on `ring`.
                         //
-                        // The expiry is read before the state bits on purpose. It is false for every
-                        // uninfected hog, which is nearly all of them, so the common case costs one
-                        // coherent load of bodies[i] instead of two. The bits cannot do that gating
-                        // themselves: they are sticky past expiry by design (see the writeback
-                        // comment at the end of main), so a sober hog keeps its DRUNK bit.
-                        if (bomb_fear_duration > 0.0 && dist < DRUNK_FEAR_RADIUS) {
-                            uint n_expiry = bodies[i].contagion_expiry_u;
-                            if (n_expiry > now_u && (bodies[i].state & STATE_DRUNK) != 0u) {
-                                float n_remaining = float(n_expiry - now_u) / CONT_TIME_SCALE;
-                                // Falls off with both the neighbour's remaining drunkenness and the
-                                // gap between us — the second factor keeps the effect from having a
-                                // hard edge at DRUNK_FEAR_RADIUS.
-                                float n_fear = DRUNK_FEAR_STRENGTH
-                                             * clamp(n_remaining / DRUNK_FEAR_FADE, 0.0, 1.0)
-                                             * (1.0 - dist / DRUNK_FEAR_RADIUS);
-                                if (n_fear > best_contagion_fear) {
-                                    best_contagion_fear = n_fear;
-                                    // Flee the drunk hog itself rather than any bomb: this is the
-                                    // origin the panic steers away from, and it is re-read every
-                                    // frame, so hogs keep backing away as the drunk one staggers.
-                                    contagion_bomb_origin = n_position;
-                                }
+                        // Gate on expiry, not the DRUNK bit: the bits are sticky past expiry
+                        // (see the writeback comment at the end of main), so a sober hog
+                        // keeps its DRUNK bit and a bit-only test would keep radiating fear.
+                        if (can_gain_fear
+                            && dist2 < DRUNK_FEAR_RADIUS * DRUNK_FEAR_RADIUS
+                            && n.contagion_expiry_u > now_u
+                            && (n.state & STATE_DRUNK) != 0u) {
+                            float n_remaining = float(n.contagion_expiry_u - now_u) / CONT_TIME_SCALE;
+                            // Falls off with both the neighbour's remaining drunkenness and the
+                            // gap between us — the second factor keeps the effect from having a
+                            // hard edge at DRUNK_FEAR_RADIUS.
+                            float n_fear = DRUNK_FEAR_STRENGTH
+                                         * clamp(n_remaining / DRUNK_FEAR_FADE, 0.0, 1.0)
+                                         * (1.0 - dist / DRUNK_FEAR_RADIUS);
+                            if (n_fear > best_contagion_fear) {
+                                best_contagion_fear = n_fear;
+                                // Flee the drunk hog itself rather than any bomb: this is the
+                                // origin the panic steers away from, and it is re-read every
+                                // frame, so hogs keep backing away as the drunk one staggers.
+                                contagion_bomb_origin = n.position;
                             }
                         }
 
                         // ---- Contagion spread: fire and poison propagate to nearby bodies ----
                         // Per-frame random seed mixes id, neighbour index and time so no
                         // two pairs (and no two frames) roll the same probability.
-                        if (spreads_fire && dist < FIRE_SPREAD_RADIUS) {
-                            try_spread_contagion(i, STATE_ON_FIRE, FIRE_SPREAD_MAX_DUR,
-                                FIRE_SPREAD_PROB, id * 31u + uint(i) + uint(time * 100.0 + 0.5),
-                                self.contagion_expiry_u, self.dps_rate_u);
+                        if (spreads_fire && dist2 < FIRE_SPREAD_RADIUS * FIRE_SPREAD_RADIUS) {
+                            try_spread_contagion(i, STATE_ON_FIRE, fire_child_expiry, self.dps_rate_u,
+                                FIRE_SPREAD_PROB, id * 31u + uint(i) + uint(time * 100.0 + 0.5), now_u);
                         }
-                        if (spreads_poison && dist < POISON_SPREAD_RADIUS) {
-                            try_spread_contagion(i, STATE_POISONED, POISON_SPREAD_MAX_DUR,
-                                POISON_SPREAD_PROB, id * 47u + uint(i) * 3u + uint(time * 100.0 + 1.5),
-                                self.contagion_expiry_u, self.dps_rate_u);
+                        if (spreads_poison && dist2 < POISON_SPREAD_RADIUS * POISON_SPREAD_RADIUS) {
+                            try_spread_contagion(i, STATE_POISONED, poison_child_expiry, self.dps_rate_u,
+                                POISON_SPREAD_PROB, id * 47u + uint(i) * 3u + uint(time * 100.0 + 1.5), now_u);
                         }
                     }
                 }
@@ -806,7 +847,6 @@ void main() {
         // or a drunk hog next to us — so the two share one back-calculated fear state and cannot
         // stack. Strongest wins.
         if (best_contagion_fear > 0.0) {
-            float self_fear   = fear_factor > 0.0 ? (1.0 - time_t) : 0.0;
             float spread_fear = best_contagion_fear * FEAR_CONTAGION_DECAY;
 
             if (spread_fear > self_fear + FEAR_SPREAD_THRESHOLD && spread_fear > FEAR_SPREAD_THRESHOLD) {
@@ -815,8 +855,12 @@ void main() {
                 self.bomb_origin_x  = contagion_bomb_origin.x;
                 self.bomb_origin_y  = contagion_bomb_origin.y;
 
-                float new_time_t = max(0.0, time - self.last_hit_time) / bomb_fear_duration;
-                fear_factor = (1.0 - new_time_t) * (1.0 - new_time_t);
+                // The fear state that last_hit_time now encodes. time_t has to move with
+                // fear_factor: the flee radius below divides by it, and leaving it stale
+                // (0 for a hog that was calm) let a newly frightened hog flee from any
+                // distance for a frame.
+                time_t      = 1.0 - spread_fear;
+                fear_factor = spread_fear * spread_fear;
                 max_speed   = mix(MAX_WALK_SPEED, MAX_FLEE_SPEED, fear_factor);
             }
         }
@@ -825,7 +869,7 @@ void main() {
     // =========================================================================
     // CATCH-UP SPRINT  (only when calm and not airborne)
     // =========================================================================
-    if (!is_falling && fear_factor < 0.01) {
+    if (!is_falling && fear_factor < FEAR_THRESHOLD) {
         // Ramp up from zero to full sprint as distance to target grows beyond SPRINT_DIST_MULT * arrive_radius
         float target_dist_blend = smoothstep(
             arrive_radius * SPRINT_DIST_MULT,
@@ -848,8 +892,14 @@ void main() {
     // STEERING FORCES
     // =========================================================================
 
+    // Speed going into this frame's steering. Nothing below changes self.velocity until the
+    // integration step, so this serves the arrive, straggler and settle terms alike.
+    float pre_speed = length(self.velocity);
+
     // ---- Separation ----
-    vec2 steer_separation = sep_count > 0
+    // Guarded like alignment and cohesion: neighbours that cancel exactly would otherwise
+    // hand normalize() a zero vector and poison the body with NaN.
+    vec2 steer_separation = (sep_count > 0 && length(separation) > NEAR_ZERO)
         ? steer_toward(normalize(separation), max_speed, self.velocity)
         : vec2(0.0);
 
@@ -870,12 +920,11 @@ void main() {
 
     if (!is_falling) {
         // Smooth-step desired speed to zero as we enter the arrive radius (prevents overshooting)
-        float t_arrive     = clamp(dist_to_target / arrive_radius, 0.0, 1.0);
-        float desired_speed = max_speed * t_arrive * t_arrive * (3.0 - 2.0 * t_arrive);
+        float desired_speed = max_speed * smoothstep(0.0, arrive_radius, dist_to_target);
 
         // straggler: amplifies arrive force for bodies far behind the crowd that have nearly stopped
         straggler = smoothstep(arrive_radius, arrive_radius * 3.0, dist_to_target)
-                  * smoothstep(max_speed * STEER_STRAGGLER_BOOST * 0.033, 0.0, length(self.velocity));
+                  * smooth_fall(0.0, max_speed * STEER_STRAGGLER_BOOST * 0.033, pre_speed);
 
         // Footstep sway: two-harmonic sinusoid modulated by speed and proximity to target
         float stride_phase = hash(id) * TAU; // per-body phase so strides don't sync up
@@ -884,11 +933,11 @@ void main() {
             + WANDER_HARMONIC_AMP * sin(time * STRIDE_FREQ * TAU * WANDER_HARMONIC_FREQ
                                         + stride_phase * WANDER_HARMONIC_PHASE)
         );
-        self.wander_angle = sway
-            * clamp(length(self.velocity) / (max_speed * WANDER_SPEED_BLEND), 0.0, 1.0)
+        float wander_angle = sway
+            * clamp(pre_speed / (max_speed * WANDER_SPEED_BLEND), 0.0, 1.0)
             * smoothstep(0.0, arrive_radius * WANDER_ARRIVE_BLEND, dist_to_target);
 
-        steer_arrive = steer_toward(rotate2d(target_dir, self.wander_angle), desired_speed, self.velocity);
+        steer_arrive = steer_toward(rotate2d(target_dir, wander_angle), desired_speed, self.velocity);
     }
 
     // ---- Obstacle avoidance (soft steering) ----
@@ -925,7 +974,7 @@ void main() {
             vec2 steer_dir = mix(
                 normalize(normal * (1.0 - OBSTACLE_TANGENT_BLEND) + tangent * OBSTACLE_TANGENT_BLEND),
                 normal,
-                smoothstep(OBSTACLE_DETECT_RADIUS * OBSTACLE_HALF_DETECT, 0.0, dist_surface)
+                smooth_fall(0.0, OBSTACLE_DETECT_RADIUS * OBSTACLE_HALF_DETECT, dist_surface)
             );
             steer_obstacle += steer_dir * (t * t * MAX_FORCE);
         }
@@ -951,19 +1000,19 @@ void main() {
     // regardless of current velocity. Used to suppress forces that cause jitter (separation
     // steering, neighbour-overlap nudges) BEFORE the combined settle can engage — breaking
     // the catch-22 where separation keeps velocity too high for settle to ever trigger.
-    float prox_settle = smoothstep(arrive_radius * SETTLE_RADIUS,
-                                    arrive_radius * SETTLE_RADIUS * SETTLE_INNER_FRACTION,
+    float prox_settle = smooth_fall(arrive_radius * SETTLE_RADIUS * SETTLE_INNER_FRACTION,
+                                    arrive_radius * SETTLE_RADIUS,
                                     dist_to_target);
 
     // settle: blends to 1 only when BOTH close AND nearly stopped → triggers hard braking.
     // Because prox_settle has already suppressed the destabilising forces by this point,
     // velocity will have decayed enough for this condition to be reachable.
     float settle = prox_settle
-                 * smoothstep(max_speed * 0.15, max_speed * 0.02, length(self.velocity));
+                 * smooth_fall(max_speed * 0.02, max_speed * 0.15, pre_speed);
 
     float calm     = 1.0 - fear_factor;
     float activity = 1.0 - settle;
-    float proximity = 1.0 - clamp(dist_to_target / arrive_radius, 0.0, 1.0); // 1 = at target, 0 = far away
+    float proximity = 1.0 - arrive_t; // 1 = at target, 0 = far away
 
     // Combine all steering forces with their behavior weights
     vec2 arrive_contrib = steer_arrive * ARRIVE_WEIGHT * (1.0 + straggler * STEER_STRAGGLER_BOOST) * activity * calm;
@@ -989,8 +1038,7 @@ void main() {
         //   NEAR → FAR  based on distance to target
         //   then crush toward SETTLE when stopping
         //   then relax toward FEAR to preserve flee momentum
-        float dist_blend  = clamp(dist_to_target / arrive_radius, 0.0, 1.0);
-        float base_damp   = mix(DAMPING_NEAR, DAMPING_FAR, dist_blend);
+        float base_damp   = mix(DAMPING_NEAR, DAMPING_FAR, arrive_t);
         float damping     = mix(mix(base_damp, DAMPING_SETTLE, settle), DAMPING_FEAR, fear_factor);
         self.velocity    *= damping;
 
@@ -1089,14 +1137,15 @@ void main() {
 
     float target_angle = self.facing_angle; // Default: hold current angle
     if (dist_to_target > self.radius * 2.0) {
-        vec2 look_dir = to_target / dist_to_target;
-        vec2 move_dir = speed > NEAR_ZERO ? (self.velocity / speed) : look_dir;
+        // target_dir is the unit look direction here: the distance test above clears its
+        // NEAR_ZERO_DIST guard.
+        vec2 move_dir = speed > NEAR_ZERO ? (self.velocity / speed) : target_dir;
 
         // Blend look and move directions as vectors, not angles — prevents 180° flip artefacts
         // when a noisy near-zero velocity crosses an axis boundary.
-        vec2 face_dir = mix(look_dir, move_dir, speed_trust);
+        vec2 face_dir = mix(target_dir, move_dir, speed_trust);
         if (length(face_dir) < NEAR_ZERO_DIST)
-            face_dir = look_dir;
+            face_dir = target_dir;
 
         target_angle = atan(face_dir.x, face_dir.y);
     }
@@ -1105,7 +1154,7 @@ void main() {
 
     // Dead-band: ignore tiny angle errors to prevent endless micro-rotation
     float dead_band = max(mix(ROT_DEADBAND_MOVING, ROT_DEADBAND_SETTLE, settle),
-                          smoothstep(max_speed * 0.15, VELOCITY_EPSILON, speed) * 0.1);
+                          smooth_fall(VELOCITY_EPSILON, max_speed * 0.15, speed) * 0.1);
     if (abs(diff_angle) < dead_band)
         diff_angle = 0.0;
 
@@ -1193,15 +1242,14 @@ void main() {
     // the atomic writes neighbour threads make to those three fields during this same
     // dispatch. That is what made fire and poison spread drop events at random.
     //
-    // radius, mass, teleport_x, teleport_z, teleport_y and pad3 are omitted because
-    // physics only ever reads them, so this also moves less data than the struct store.
+    // radius, mass, teleport_x, teleport_z, teleport_y, pad7 and pad3 are omitted because
+    // physics never modifies them, so this also moves less data than the struct store.
     // -------------------------------------------------------------------------
     bodies[id].position          = self.position;
     bodies[id].velocity          = self.velocity;
     bodies[id].height            = self.height;
     bodies[id].vertical_velocity = self.vertical_velocity;
     bodies[id].facing_angle      = self.facing_angle;
-    bodies[id].wander_angle      = self.wander_angle;
     bodies[id].health            = self.health;
     bodies[id].last_hit_time     = self.last_hit_time;
     bodies[id].bomb_origin_x     = self.bomb_origin_x;
@@ -1231,7 +1279,7 @@ void main() {
     // during this same dispatch therefore tints one frame later than it used to, when the
     // transform pass read the buffer back after a barrier. Projectile hits are unaffected —
     // those land in the previous dispatch. One frame at 60 Hz is not observable, and avoiding
-    // an extra coherent read of the expiry per body is the whole point of the merge.
+    // a second read of the expiry per body is the whole point of the merge.
     //
     // The colours below leave the display range (see FIRE_GLOW and friends) — the pulse now
     // scales the whole colour rather than one channel, so it modulates the glow instead of

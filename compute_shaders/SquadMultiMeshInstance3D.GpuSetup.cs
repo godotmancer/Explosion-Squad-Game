@@ -41,7 +41,7 @@ public sealed partial class SquadMultiMeshInstance3D
       );
       if (SpawnPoint != null)
       {
-        position = new Vector2(SpawnPoint.Position.X, SpawnPoint.Position.Z);
+        position = new Vector2(SpawnPoint.GlobalPosition.X, SpawnPoint.GlobalPosition.Z);
       }
       bodiesData[i] = new GpuBody
       {
@@ -52,7 +52,6 @@ public sealed partial class SquadMultiMeshInstance3D
         Radius = BodyRadius,
         Mass = _rndGen.RandfRange(0.5f, 1.1f),
         FacingAngle = 0.0f,
-        WanderAngle = 0.0f,
         Health = HogHealth,
         LastHitTime = 0.0f,
         BombOriginX = 0.0f,
@@ -272,7 +271,7 @@ public sealed partial class SquadMultiMeshInstance3D
     floats[PHYS_PUSH_BOMB_FEAR_DURATION] = bombFearDuration;
     floats[PHYS_PUSH_GRAVITY] = Gravity;
     floats[PHYS_PUSH_Y_OFFSET] = YOffset;
-    uints[PHYS_PUSH_FRAME_PARITY] = _hashFrameParity;
+    uints[PHYS_PUSH_FRAME_STAMP] = _hashFrameStamp;
     floats[PHYS_PUSH_HOG_GRAVITY_SCALE] = HogGravityScale;
   }
 
@@ -281,7 +280,7 @@ public sealed partial class SquadMultiMeshInstance3D
     var floats = MemoryMarshal.Cast<byte, float>(_hashPushBytes.AsSpan());
     var uints = MemoryMarshal.Cast<byte, uint>(_hashPushBytes.AsSpan());
     var ints = MemoryMarshal.Cast<byte, int>(_hashPushBytes.AsSpan());
-    uints[HASH_PUSH_PARITY] = _hashFrameParity;
+    uints[HASH_PUSH_FRAME_STAMP] = _hashFrameStamp;
     ints[HASH_PUSH_NUM_BODIES] = numBodies;
     floats[HASH_PUSH_Y_OFFSET] = yOffset;
     floats[3] = 0f; // pad

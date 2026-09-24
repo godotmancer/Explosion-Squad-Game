@@ -16,3 +16,4 @@ override.cfg
 **/venv
 .idea
 Session.vim
+addons/godot_ai

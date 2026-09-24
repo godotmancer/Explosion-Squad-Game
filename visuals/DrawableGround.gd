@@ -4,7 +4,10 @@ class_name DrawableGround
 
 @export var hogs_mesh_instances: SquadMultiMeshInstance3D
 @export var size: Vector2i = Vector2i(2048, 2048)
-@export var color: Color = Color.AQUA
+@export var color: Color = Color.AQUA :
+  set(value):
+    color = value
+
 @export var explosion_texture: Texture2D
 @export var projectile_texture: Texture2D
 @export var explosions_per_frame: int = 5

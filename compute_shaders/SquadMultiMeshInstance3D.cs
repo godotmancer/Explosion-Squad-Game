@@ -193,11 +193,12 @@ public sealed partial class SquadMultiMeshInstance3D : MultiMeshInstance3D
     public int SourceBodyIndex; // -1 = not a hog; else index of throwing hog
   }
 
-  // Spatial hash — sizes must match constants in spatial_hash_build.glsl / physics_compute.glsl
-  // HASH_TABLE_SIZE must be a power of two: the shaders mask with (size - 1).
-  // Fixed, not scaled to NumBodies: the build shader's parity scheme means no pass ever
-  // iterates the table, so an oversized table costs allocation only (128 KB counts +
-  // 8 MB entries) and never per-frame time. See the sizing note in spatial_hash_build.glsl.
+  // Spatial hash — sizes must match constants in all three compute shaders.
+  // The table is a HASH_GRID_W x HASH_GRID_H (256 x 128) wrap-around grid of 2 m cells, so it
+  // must stay a product of two powers of two. Fixed, not scaled to NumBodies: the frame-stamp
+  // scheme means no pass ever iterates the table, so an oversized table costs allocation only
+  // (128 KB counts + 8 MB entries) and never per-frame time. See the sizing note in
+  // spatial_hash_build.glsl.
   public const int HASH_TABLE_SIZE = 32768;
   public const int HASH_MAX_PER_CELL = 64;
 
@@ -206,7 +207,13 @@ public sealed partial class SquadMultiMeshInstance3D : MultiMeshInstance3D
   public const int HASH_OVERFLOW_SLOT = HASH_TABLE_SIZE;
   public const uint HASH_COUNTS_BUFFER_SIZE = (HASH_TABLE_SIZE + 1) * sizeof(uint);
 
-  // HASH_CELL_SIZE is declared in the shaders only; no C# behaviour depends on the value.
+  // Each bucket word is (frame stamp << 16) | entry count, and a word carrying any stamp but
+  // this frame's reads as empty — that is what lets the build skip a clear pass. The stamp is
+  // the physics frame index masked to 16 bits; see where it advances in _PhysicsProcess.
+  public const uint HASH_STAMP_MASK = 0xFFFF;
+
+  // HASH_CELL_SIZE and HASH_GRID_W/H are declared in the shaders only; no C# behaviour
+  // depends on their values.
 
   private RenderingDevice _rd;
   private Rid _physicsBuffer;
@@ -226,14 +233,14 @@ public sealed partial class SquadMultiMeshInstance3D : MultiMeshInstance3D
   private byte[] _hashPushBytes;
 
   // Push constant layout for spatial_hash_build.glsl (4 × float/uint = 16 bytes)
-  private const int HASH_PUSH_PARITY = 0; // uint  frame_parity (0 or 1)
+  private const int HASH_PUSH_FRAME_STAMP = 0; // uint  frame_stamp (see HASH_STAMP_MASK)
   private const int HASH_PUSH_NUM_BODIES = 1; // int   num_bodies
   private const int HASH_PUSH_Y_OFFSET = 2; // float y_offset
 
   // slot 3 is padding
   private const int HASH_BUILD_PUSH_SIZE = 4 * sizeof(float);
 
-  private uint _hashFrameParity; // toggles 0 ↔ 1 each physics frame
+  private uint _hashFrameStamp; // physics frame index & HASH_STAMP_MASK
   private int _projReadbackCounter; // throttle: only read projectile buffer every N frames
 
   // Projectile GPU infrastructure
@@ -280,7 +287,7 @@ public sealed partial class SquadMultiMeshInstance3D : MultiMeshInstance3D
     public float Radius;
     public float Mass;
     public float FacingAngle;
-    public float WanderAngle;
+    public float Pad7; // spare — was WanderAngle, now a per-frame local in physics_compute.glsl
     public float Health;
     public float LastHitTime;
     public float BombOriginX;
@@ -323,7 +330,6 @@ public sealed partial class SquadMultiMeshInstance3D : MultiMeshInstance3D
 
   // Body flag bits (must match physics_compute.glsl)
   public const uint BODY_FLAG_TELEPORT = 1u;
-  public const uint BODY_FLAG_HIT_FRAME = 2u;
 
   public const int OBSTACLE_STRIDE = 12; // floats per obstacle (center, half_ext, axis, vel, type, margin, angular_vel, pad)
 
@@ -359,8 +365,9 @@ public sealed partial class SquadMultiMeshInstance3D : MultiMeshInstance3D
   public const int BOMB_FORCE = 2; // float force
   public const int BOMB_RADIUS = 3; // float radius
   public const int BOMB_DAMAGE = 4; // float damage
+  public const int BOMB_CAUSES_FEAR = 5; // float causes_fear  (1 = real bomb, 0 = death-fear nudge)
 
-  // [5..7] explicit padding in the GLSL struct
+  // [6..7] explicit padding in the GLSL struct
 
   // Obstacle buffer  (OBSTACLE_STRIDE = 12 — struct Obstacle in physics_compute.glsl)
   public const int OBS_CENTER_X = 0; // vec2 center
@@ -376,7 +383,8 @@ public sealed partial class SquadMultiMeshInstance3D : MultiMeshInstance3D
   public const int OBS_ANGULAR_VEL = 10; // float angular_vel
   public const int OBS_PAD = 11; // float pad (alignment)
 
-  // Obstacle type values — must match OBSTACLE_CIRCLE / OBSTACLE_OBB in physics_compute.glsl
+  // Obstacle type values — physics_compute.glsl treats type < 0.5 as a circle, anything else
+  // as an OBB (get_obstacle_surface)
   public const float OBS_TYPE_CIRCLE = 0f;
   public const float OBS_TYPE_OBB = 1f;
 
@@ -423,7 +431,7 @@ public sealed partial class SquadMultiMeshInstance3D : MultiMeshInstance3D
   public const int PROJ_PUSH_NUM_BODIES = 2;
   public const int PROJ_PUSH_GRAVITY = 3;
   public const int PROJ_PUSH_Y_OFFSET = 4;
-  public const int PROJ_PUSH_FRAME_PARITY = 5;
+  public const int PROJ_PUSH_FRAME_STAMP = 5;
   public const int PROJ_PUSH_TIME = 6;
   public const int PROJ_PUSH_SIZE = 8 * sizeof(float); // 8 slots
 
@@ -440,7 +448,7 @@ public sealed partial class SquadMultiMeshInstance3D : MultiMeshInstance3D
   public const int PHYS_PUSH_BOMB_FEAR_DURATION = 9; // float bomb_fear_duration
   public const int PHYS_PUSH_GRAVITY = 10; // float gravity
   public const int PHYS_PUSH_Y_OFFSET = 11; // float y_offset
-  public const int PHYS_PUSH_FRAME_PARITY = 12; // uint  frame_parity (0 or 1)
+  public const int PHYS_PUSH_FRAME_STAMP = 12; // uint  frame_stamp (see HASH_STAMP_MASK)
   public const int PHYS_PUSH_HOG_GRAVITY_SCALE = 13; // float hog_gravity_scale
 
   private int _numObstacles;
@@ -671,12 +679,12 @@ public sealed partial class SquadMultiMeshInstance3D : MultiMeshInstance3D
     // single Submit+Sync per frame.  Physics writes the instance buffer from its
     // own tail, so there is no separate transform pass and no second sync point.
     //
-    // The build shader uses a 1-bit frame parity tag (bit 31 of hash_counts[])
-    // to lazily reset stale buckets, eliminating the need for a separate clear
-    // pass.
+    // The build shader uses a 16-bit frame stamp (high half of each hash_counts[]
+    // word) to lazily reset stale buckets, eliminating the need for a separate
+    // clear pass.
     //
     // ComputeListAddBarrier ensures each dispatch's writes are visible to the
-    // next one that reads them.  The parity check in the physics shader is an
+    // next one that reads them.  The stamp check in the physics shader is an
     // additional safety net: if the barrier is imperfect (known Metal edge case
     // for storage-buffer writes), physics silently treats those stale buckets as
     // empty rather than reading garbage body indices.
@@ -721,8 +729,16 @@ public sealed partial class SquadMultiMeshInstance3D : MultiMeshInstance3D
     _rd.Submit();
     _rd.Sync();
 
-    // Toggle parity after GPU work is complete.
-    _hashFrameParity ^= 1u;
+    // Advance the hash frame stamp after GPU work is complete, so all three shaders saw the
+    // same value this frame.
+    _hashFrameStamp = (_hashFrameStamp + 1) & HASH_STAMP_MASK;
+    if (_hashFrameStamp == 0)
+    {
+      // The stamp just wrapped, so a bucket last written exactly 65536 frames ago would carry
+      // the current stamp and read as valid with its old contents. Zero every bucket word
+      // before the next build so none can. Leaves the overflow counter past the table alone.
+      EnqueueGpuClear(GpuTarget.HashCounts, 0, HASH_TABLE_SIZE * sizeof(uint));
+    }
 
     if (DebugHashOverflow)
     {
@@ -824,7 +840,6 @@ public sealed partial class SquadMultiMeshInstance3D : MultiMeshInstance3D
         Radius = BodyRadius,
         Mass = _rndGen.RandfRange(0.5f, 1.1f),
         FacingAngle = 0.0f,
-        WanderAngle = 0.0f,
         Health = HogHealth,
         LastHitTime = 0.0f,
         BombOriginX = 0.0f,

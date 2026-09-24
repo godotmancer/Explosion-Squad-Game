@@ -128,8 +128,12 @@ public sealed partial class SquadMultiMeshInstance3D
       _bombStaging[idx + BOMB_FORCE] = bomb.Force * bombT;
       _bombStaging[idx + BOMB_RADIUS] = bomb.Radius;
       _bombStaging[idx + BOMB_DAMAGE] = damage;
-      _bombStaging[idx + 5] = 0f; // explicit padding (_pad1.._pad3 in the GLSL struct)
-      _bombStaging[idx + 6] = 0f;
+      // Real bombs make their victims panic, so while one is live the physics shader widens
+      // its neighbour scan to let that panic spread. The death-fear nudges from OnHogDied
+      // (Damage == 0) frighten nobody and must not widen it. Keyed on bomb.Damage rather than
+      // `damage`, which drops to 0 after the first frame of a real bomb.
+      _bombStaging[idx + BOMB_CAUSES_FEAR] = bomb.Damage > 0f ? 1f : 0f;
+      _bombStaging[idx + 6] = 0f; // explicit padding (_pad2, _pad3 in the GLSL struct)
       _bombStaging[idx + 7] = 0f;
 
       bomb.Timer -= fdelta;
