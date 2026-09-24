@@ -731,7 +731,7 @@ public sealed partial class SquadMultiMeshInstance3D : MultiMeshInstance3D
       var spawnTarget = MouseGlobalPositionNode.GlobalPosition;
       var forceDir = spawnTarget.DirectionTo(TargetMarker.GlobalPosition).Normalized();
       SpawnHogs(
-        10,
+        100,
         spawnTarget,
         new Vector3(
           forceDir.X * _rndGen.RandfRange(5f, 15f),
