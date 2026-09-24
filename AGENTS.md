@@ -103,7 +103,7 @@ Explosion-Squad-Game/
 ├── shaders/                  # Visual-only gdshaders (black hole, openvat, broken TV)
 ├── ui/                       # GDScript UI nodes (Fps, HogsKilled, TotalHogs) + TrajectoryOverlay.cs
 ├── assets/animal_hog_merged.tres  # Single-surface baked hog mesh used by the MultiMesh
-├── Main.gd                   # Input dispatch, projectile spawn keys 1–6 (paced by fire_interval)
+├── Main.gd                   # Input dispatch, projectile keys 1–6 (paced by fire_interval), Shift lobs
 ├── Global.gd                 # @tool Autoload — state enums + cross-system signals
 └── AGENTS.md                 # This file
 ```
@@ -435,6 +435,12 @@ positions by `Engine.get_physics_interpolation_fraction()`. At 80 m/s a shot cov
 60 Hz tick; drawn only on physics frames, a stream of shots hopped in step every other rendered
 frame and read as a static dotted grid.
 
+Colour: `SimpleProjectile.tscn`'s mesh and its material are sub-resources, so **every projectile
+instance shares them**. `_ready` therefore never touches that material; it sets a surface
+override from `_material_for(color)`, a copy made once per colour and cached in the static
+`_materials_by_color`. Recolouring the shared material itself turned every projectile in flight
+the colour of the latest shot.
+
 ### Collision (projectile_compute.glsl)
 
 Each frame the GPU sweeps the projectile's path — cut short where it meets the ground —
@@ -461,6 +467,20 @@ An ability with `explosion_radius > 0` bursts where it lands, on a hog or the gr
 the same shockwave, damage falloff and panic as a dropped bomb (`DropBomb` is now a
 `Detonate` with the bomb exports). `MortarProjectile.tres` (key 6) is the example: lobbed at 55°
 with `gravity_scale` 2.5, bursting over 3.5 m.
+
+### Lob modifier (Shift)
+
+Holding the `lob_modifier` action (Shift) while firing lobs **any** projectile onto the mouse
+point instead of firing it straight: `Main._as_fired` hands `spawn_projectile` a copy of the
+ability with `launch_angle_deg` / `gravity_scale` set from `Main.lob_angle_deg` /
+`lob_gravity_scale` (defaults match the mortar). Everything else about the ability is kept.
+Copies of the shared abilities are made once and cached in `_lobbed`; the teleport ability,
+already duplicated per shot for its destination, is lobbed in place instead, so the cache
+cannot grow per shot. The cooldown stays keyed on the original ability. An ability that lobs by
+itself (the mortar) is fired unchanged.
+
+The fire actions match with Shift held because Godot matches actions non-exactly by default
+(modifiers ignored). The camera's own Shift use is pan-while-orbit-dragging only.
 
 ### Kill path (GPU-initiated)
 

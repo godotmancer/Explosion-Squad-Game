@@ -43,23 +43,39 @@ var _flight_time: float = 0.0          # estimated total flight time (for progre
 var _active: bool = false
 var _slot: int = -1                    # GPU projectile slot; -1 if no spawner
 
+# One material per projectile colour, shared by every projectile of that colour.
+static var _materials_by_color := {}
+
 func _ready() -> void:
   add_to_group("projectile")
-  var material = mesh_instance_3d.get_active_material(0) as StandardMaterial3D
-  material.albedo_color = Color(0.764, 0.764, 0.0) * 5.4
+  var color := Color(0.764, 0.764, 0.0) * 5.4
   if ability.contagion_type == ProjectileAbility.PROJECTILE_CONTAGION_FIRE:
-    material.albedo_color = Color(0.909, 0.0, 0.0) * 5.4
+    color = Color(0.909, 0.0, 0.0) * 5.4
   elif ability.contagion_type == ProjectileAbility.PROJECTILE_CONTAGION_POISON:
-    material.albedo_color = Color(0.129, 0.737, 0.215) * 5.4
+    color = Color(0.129, 0.737, 0.215) * 5.4
   elif ability.contagion_type == ProjectileAbility.PROJECTILE_CONTAGION_ALCOHOL:
-    material.albedo_color = Color(0.367, 0.086, 0.521) * 5.4
+    color = Color(0.367, 0.086, 0.521) * 5.4
   elif ability.explosion_radius > 0.0:
-    material.albedo_color = Color(1.0, 0.42, 0.05) * 5.4
+    color = Color(1.0, 0.42, 0.05) * 5.4
 
   if ability.has_teleport:
-    material.albedo_color = material.albedo_color.blend(Color(0.0, 1.382, 1.64))
+    color = color.blend(Color(0.0, 1.382, 1.64))
 
-  material.albedo_color.a = 1.0
+  color.a = 1.0
+  mesh_instance_3d.set_surface_override_material(0, _material_for(color))
+
+
+## A copy of the mesh's own material in [param color], made once per colour. The mesh and
+## its material are sub-resources of the projectile scene, shared by every instance, so
+## recolouring that material itself turned every projectile in flight the colour of the
+## latest shot.
+func _material_for(color: Color) -> Material:
+  var material: StandardMaterial3D = _materials_by_color.get(color)
+  if material == null:
+    material = (mesh_instance_3d.mesh.surface_get_material(0) as StandardMaterial3D).duplicate()
+    material.albedo_color = color
+    _materials_by_color[color] = material
+  return material
 
 
 ## Fire the projectile from [param from] at [param to], aimed per the ability: straight at
