@@ -8,7 +8,7 @@ using Godot;
 public sealed partial class SquadMultiMeshInstance3D
 {
   /// <summary>
-  /// Called after the GPU sync + compaction loop each physics frame.
+  /// Called after the GPU sync and the death loop each physics frame.
   /// Tests every alive hog against each trigger zone using transform-buffer
   /// positions we already have in <paramref name="gpuFloats"/>, in one pass over the hogs.
   ///

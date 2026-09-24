@@ -251,21 +251,16 @@ public sealed partial class SquadMultiMeshInstance3D
     _physicsBuffer = grown;
 
     FreeGpuRid(ref _transformBuffer);
-    // Resized, not replaced: it holds the hogs the MultiMesh is drawing, put back below.
+    // MultimeshSetBuffer takes exactly InstanceCount rows, so this grows with the MultiMesh.
     Array.Resize(ref _transformFloats, newCapacity * INSTANCE_STRIDE);
     _transformBuffer = _rd.StorageBufferCreate(
       (uint)(_transformFloats.Length * sizeof(float))
     );
 
-    // Resizing the MultiMesh clears it. The next readback is a tick away (the GPU runs a tick
-    // behind, see CompleteGpuTick), so without this the whole crowd would vanish for a frame
-    // on every growth.
+    // Resizing the MultiMesh clears it. This runs in a physics tick and _Process follows before
+    // the frame is drawn, so redrawing from the last readback there keeps the crowd on screen.
     Multimesh.InstanceCount = newCapacity;
-    if (ShowHogs)
-    {
-      Multimesh.VisibleInstanceCount = _visibleHogCount;
-      RenderingServer.MultimeshSetBuffer(Multimesh.GetRid(), _transformFloats);
-    }
+    _hogsDrawDirty = true;
 
     RebuildPhysicsUniformSet();
     RebuildHashUniformSet();
