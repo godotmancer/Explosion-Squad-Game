@@ -6,6 +6,19 @@ using Godot;
 
 public sealed partial class SquadMultiMeshInstance3D
 {
+  /// <summary>
+  /// Height of the simulation's origin in world space. The GPU simulates in this node's local
+  /// space, which the scene lifts off the ground (Main.tscn puts it at y = 0.25), while
+  /// projectiles are aimed and drawn in world space. Positions are shifted by this on the way
+  /// into the projectile buffer and back on the way out, so projectiles collide with hogs where
+  /// they are drawn. Only the height differs: everything else already treats the node's XZ
+  /// as world XZ.
+  /// </summary>
+  private float SimOriginY => GlobalPosition.Y;
+
+  /// <summary>World height at which the GPU retires a projectile as having hit the ground.</summary>
+  public float ProjectileGroundHeight => YOffset + SimOriginY;
+
   private void WriteProjectilePush(float deltaTime, float time)
   {
     var floats = MemoryMarshal.Cast<byte, float>(_projPushBytes.AsSpan());
@@ -18,7 +31,7 @@ public sealed partial class SquadMultiMeshInstance3D
     floats[PROJ_PUSH_Y_OFFSET] = YOffset;
     uints[PROJ_PUSH_FRAME_STAMP] = _hashFrameStamp;
     floats[PROJ_PUSH_TIME] = time;
-    floats[7] = 0f; // pad
+    floats[PROJ_PUSH_BODY_RADIUS] = BodyRadius;
   }
 
   private void UpdateProjectileLifetimes(float fdelta)
@@ -105,9 +118,10 @@ public sealed partial class SquadMultiMeshInstance3D
         continue; // still flying
       }
 
+      // Back from simulation space to world space (see SimOriginY).
       var hitPos = new Vector3(
         floats[(i * PROJ_STRIDE) + PROJ_POS_X],
-        floats[(i * PROJ_STRIDE) + PROJ_POS_Y],
+        floats[(i * PROJ_STRIDE) + PROJ_POS_Y] + SimOriginY,
         floats[(i * PROJ_STRIDE) + PROJ_POS_Z]
       );
 
@@ -158,7 +172,8 @@ public sealed partial class SquadMultiMeshInstance3D
   }
 
   /// <summary>
-  /// Spawns a GPU-driven projectile. Returns the slot index (≥ 0) on success,
+  /// Spawns a GPU-driven projectile at world <paramref name="position"/> with world
+  /// <paramref name="velocity"/>. Returns the slot index (≥ 0) on success,
   /// or -1 if the pool is exhausted. Pass the slot to
   /// <see cref="RegisterProjectileHitCallback"/> to receive a collision notification.
   /// </summary>
@@ -173,9 +188,11 @@ public sealed partial class SquadMultiMeshInstance3D
     _projLifetimes[slot] = ability.Lifetime + PROJ_LIFETIME_GRACE;
     _projPendingUpload[slot] = true;
 
+    // Heights go into simulation space (see SimOriginY); velocities are unaffected.
+    var simOriginY = SimOriginY;
     var b = slot * PROJ_STRIDE;
     _projAllStagingFloats[b + PROJ_POS_X] = position.X;
-    _projAllStagingFloats[b + PROJ_POS_Y] = position.Y;
+    _projAllStagingFloats[b + PROJ_POS_Y] = position.Y - simOriginY;
     _projAllStagingFloats[b + PROJ_POS_Z] = position.Z;
     _projAllStagingFloats[b + PROJ_RADIUS] = ability.Radius > 0f ? ability.Radius : 0.4f;
     _projAllStagingFloats[b + PROJ_VEL_X] = velocity.X;
@@ -190,7 +207,8 @@ public sealed partial class SquadMultiMeshInstance3D
     _projAllStagingFloats[b + PROJ_LIFETIME] = ability.Lifetime;
     _projAllStagingFloats[b + PROJ_TELEPORT_X] = ability.TeleportXZ.X;
     _projAllStagingFloats[b + PROJ_TELEPORT_Z] = ability.TeleportXZ.Y;
-    _projAllStagingFloats[b + PROJ_TELEPORT_Y] = ability.TeleportY;
+    _projAllStagingFloats[b + PROJ_TELEPORT_Y] = ability.TeleportY - simOriginY;
+    _projAllStagingFloats[b + PROJ_GRAVITY_SCALE] = ability.GravityScale;
     _projAllStagingFloats[b + PROJ_CONTAGION] = BitConverter.UInt32BitsToSingle(
       ability.ContagionType
     );

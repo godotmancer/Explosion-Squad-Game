@@ -69,21 +69,28 @@ public sealed partial class SquadMultiMeshInstance3D
     EmitSignal(SignalName.HogDied, index, position, stateBits);
   }
 
-  private void DropBomb(Vector3 hit)
+  private void DropBomb(Vector3 hit) => Detonate(hit, BombRadius, BombForce, BombDamage);
+
+  /// <summary>
+  /// Sets off an explosion at world <paramref name="position"/>: the same shockwave, damage
+  /// falloff and panic as a dropped bomb, at the given size. Projectiles that burst on impact
+  /// (a mortar shell) call this through <c>ProjectilesSpawner.Detonate</c>.
+  /// </summary>
+  public void Detonate(Vector3 position, float radius, float force, float damage)
   {
     _activeBombs.Add(
       new BombState
       {
-        Pos = new Vector2(hit.X, hit.Z),
+        Pos = new Vector2(position.X, position.Z),
         Timer = BombDuration,
         DamageApplied = false,
-        Force = BombForce,
-        Radius = BombRadius,
+        Force = force,
+        Radius = radius,
         Duration = BombDuration,
-        Damage = BombDamage,
+        Damage = damage,
       }
     );
-    _ = (DrawableGround?.CallDeferred("draw_explosion", hit));
+    _ = (DrawableGround?.CallDeferred("draw_explosion", position));
   }
 
   private void UpdateBombBuffer(float fdelta)

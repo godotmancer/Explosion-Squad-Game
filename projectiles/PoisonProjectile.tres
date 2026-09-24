@@ -11,4 +11,7 @@ force_dir = Vector3(0, 1, 0)
 damage_per_second = 0.2
 contagion_type = 512
 contagion_duration = 20.0
+spread_deg = 1.5
+speed_variance = 0.03
+fire_interval = 0.06
 metadata/_custom_type_script = "uid://ccsl3vs1sry8u"

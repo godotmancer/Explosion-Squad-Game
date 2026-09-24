@@ -1,0 +1,19 @@
+[gd_resource type="Resource" script_class="ProjectileAbility" format=3]
+
+[ext_resource type="Script" uid="uid://ccsl3vs1sry8u" path="res://projectiles/ProjectileAbility.gd" id="1_mortar"]
+
+[resource]
+script = ExtResource("1_mortar")
+radius = 0.9
+lifetime = 8.0
+damage = 20.0
+gravity_scale = 2.5
+launch_angle_deg = 55.0
+spread_deg = 1.5
+speed_variance = 0.02
+fire_interval = 0.3
+force = 0.0
+explosion_radius = 3.5
+explosion_force = 120.0
+explosion_damage = 40.0
+metadata/_custom_type_script = "uid://ccsl3vs1sry8u"

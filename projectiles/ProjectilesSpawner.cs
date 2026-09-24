@@ -42,7 +42,9 @@ public partial class ProjectilesSpawner : Node
   //   damage          float  — flat damage on hit
   //   dps             float  — damage-per-second while contagion active
   //   force           float  — knockback magnitude
-  //   force_dir       Vector3 — knockback direction (normalised); if zero, uses impact normal
+  //   force_dir       Vector3 — knockback direction (normalised); if zero, the projectile's
+  //                             direction of travel at impact
+  //   gravity_scale   float  — × world gravity for this projectile (0 = dead straight)
   //   has_teleport         bool
   //   teleport_pos         Vector3 — world-space destination (X/Z position, Y = spawn height)
   //   teleport_force_dir   Vector3 — post-teleport launch velocity (direction × magnitude);
@@ -76,9 +78,25 @@ public partial class ProjectilesSpawner : Node
       return -1;
     }
 
-    var ability = ParseAbility(abilityVar, velocity.Normalized());
+    var ability = ParseAbility(abilityVar);
     return Squad.SpawnProjectile(position, velocity, ability);
   }
+
+  /// <summary>
+  /// World gravity the GPU applies to projectiles, before each projectile's own
+  /// <c>gravity_scale</c>. Visual projectiles read it so they fly the same arc.
+  /// </summary>
+  public float GetGravity() => Squad?.Gravity ?? 9.8f;
+
+  /// <summary>World height at which the GPU retires a projectile as having hit the ground.</summary>
+  public float GetGroundHeight() => Squad?.ProjectileGroundHeight ?? 0f;
+
+  /// <summary>
+  /// Sets off an explosion at world <paramref name="position"/> — see
+  /// <see cref="SquadMultiMeshInstance3D.Detonate"/>.
+  /// </summary>
+  public void Detonate(Vector3 position, float radius, float force, float damage) =>
+    Squad?.Detonate(position, radius, force, damage);
 
   /// <summary>
   /// Registers a GDScript Callable that is invoked once if the GPU projectile
@@ -141,10 +159,7 @@ public partial class ProjectilesSpawner : Node
   // -------------------------------------------------------------------------
   // Internal helpers
   // -------------------------------------------------------------------------
-  private SquadMultiMeshInstance3D.ProjectileAbility ParseAbility(
-    Variant abilityVar,
-    Vector3 defaultForceDir
-  )
+  private SquadMultiMeshInstance3D.ProjectileAbility ParseAbility(Variant abilityVar)
   {
     var obj = abilityVar.As<GodotObject>();
 
@@ -153,11 +168,14 @@ public partial class ProjectilesSpawner : Node
     var damage = GetObj(obj, "damage", DefaultDamage);
     var dps = GetObj(obj, "damage_per_second", 0f);
     var force = GetObj(obj, "force", DefaultForce);
+    var gravityScale = GetObj(obj, "gravity_scale", 0f);
 
-    var forceDir = GetV3Obj(obj, "force_dir", defaultForceDir);
+    // Left at zero when the ability does not set one: the GPU then pushes along the
+    // projectile's velocity at impact, which for a lobbed shot is not its launch direction.
+    var forceDir = GetV3Obj(obj, "force_dir", Vector3.Zero);
     if (forceDir.LengthSquared() < 0.0001f)
     {
-      forceDir = defaultForceDir;
+      forceDir = Vector3.Zero;
     }
 
     var hasTele = GetBoolObj(obj, "has_teleport", false);
@@ -187,6 +205,7 @@ public partial class ProjectilesSpawner : Node
       HasTeleport = hasTele,
       TeleportXZ = new Vector2(telePos.X, telePos.Z),
       TeleportY = telePos.Y,
+      GravityScale = gravityScale,
       ContagionType = contagion,
       ContagionDuration = contDur,
       SourceBodyIndex = srcBody,

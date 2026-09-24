@@ -12,4 +12,5 @@ contagion_duration = 0.1
 has_teleport = true
 teleport_force_dir = Vector3(0, 20, 0)
 health_fraction = 0.75
+fire_interval = 0.2
 metadata/_custom_type_script = "uid://ccsl3vs1sry8u"

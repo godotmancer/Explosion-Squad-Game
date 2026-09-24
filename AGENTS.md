@@ -93,7 +93,7 @@ Explosion-Squad-Game/
 │   ├── ProjectilesSpawner.cs                  # GDScript-callable C# facade
 │   ├── ProjectileBase.gd                      # Base visual projectile (Euler integration)
 │   ├── ProjectileAbility.gd                   # Resource class for ability data
-│   └── *.tres                                 # Bullet, Fire, Poison, Drunk, Teleport abilities
+│   └── *.tres                                 # Bullet, Fire, Poison, Drunk, Teleport, Mortar abilities
 ├── bombs/
 │   └── BombSpawner.cs                         # Spawns bomb visual + invokes DropBomb callback
 ├── components/               # GDScript @tool components (Animator, LookAtTracker,
@@ -103,7 +103,7 @@ Explosion-Squad-Game/
 ├── shaders/                  # Visual-only gdshaders (black hole, openvat, broken TV)
 ├── ui/                       # GDScript UI nodes (Fps, HogsKilled, TotalHogs) + TrajectoryOverlay.cs
 ├── assets/animal_hog_merged.tres  # Single-surface baked hog mesh used by the MultiMesh
-├── Main.gd                   # Input dispatch, projectile spawn keys 1–5
+├── Main.gd                   # Input dispatch, projectile spawn keys 1–6 (paced by fire_interval)
 ├── Global.gd                 # @tool Autoload — state enums + cross-system signals
 └── AGENTS.md                 # This file
 ```
@@ -306,7 +306,14 @@ projectile_compute (hits) — keep the two identical. Consequences to preserve:
 `PROJ_STRIDE = 24` floats. Slot 18 (`PROJ_FLAGS`) is a `uint` reinterpreted as
 `float` — use `BitConverter.UInt32BitsToSingle` / `SingleToUInt32Bits` to read/write.
 Slot 16 (`PROJ_CONTAGION`) is the same encoding. Never write raw `uint` values to
-a `float[]` buffer directly.
+a `float[]` buffer directly. Slot 21 (`PROJ_GRAVITY_SCALE`) multiplies the world gravity for
+that projectile; slots 22–23 are spare.
+
+Positions and the teleport height in this buffer are in the squad's **simulation space**, not
+world space: `SpawnProjectile` subtracts the squad node's height (`SimOriginY`, 0.25 in
+Main.tscn) and `ReclaimGpuKilledProjectiles` adds it back to the reported hit point. Bodies live
+in that space, so without the shift projectiles collided with hogs 0.25 m below where they are
+drawn and reached the GPU's ground 0.25 m under the visible floor.
 
 ### Instance (physics_compute.glsl tail output, binding 5)
 
@@ -384,19 +391,76 @@ allocation, zero copy.
 ### Spawn path
 
 ```
-GDScript (Main.gd / ability resource)
-  └─ ProjectileBase.launch(from, to)           # creates visual projectile node
+GDScript (Main.gd — paced by each ability's fire_interval)
+  └─ ProjectileBase.launch(from, to)           # or launch_velocity(from, velocity)
+       ├─ aim_velocity: direct at ability.speed, or ballistic_velocity at
+       │  ability.launch_angle_deg (a lob that lands on `to`), then spread + speed variance
        ├─ ProjectilesSpawner.SpawnProjectileWithVelocity(pos, vel, ability)
        │    └─ SquadMultiMeshInstance3D.SpawnProjectile(pos, vel, ability)
        │         ├─ Dequeue slot from _projFreeSlots
        │         ├─ Write floats into _projAllStagingFloats[slot * PROJ_STRIDE + ...]
+       │         │  (heights shifted into simulation space — see §7)
        │         └─ Enqueue slot index into _pendingProjSpawns
-       └─ ProjectilesSpawner.RegisterProjectileHitCallback(slot, _on_gpu_hit)
+       ├─ ProjectilesSpawner.RegisterProjectileHitCallback(slot, _on_gpu_hit)
+       └─ one _step() straight away, to match the GPU's first step (below)
 ```
 
-Staging floats are uploaded to GPU in `UploadPendingProjectiles()` called at the
-*start* of the next `_PhysicsProcess`, before compute dispatch — so every spawned
-projectile is live on the GPU within one physics frame.
+Staging floats are uploaded in `UploadPendingProjectiles()`, early in the squad's
+`_PhysicsProcess`. When `Main.gd` fires, that is the same physics frame — `Main` is the squad's
+parent and is processed first — so the GPU copy takes its first step in the frame it was fired.
+
+### Two copies, one path
+
+Every projectile exists twice: the drawn `ProjectileBase` node and the GPU copy that does the
+damage. They must fly the same path, so both use:
+
+- the same velocity (the node passes its own to `SpawnProjectileWithVelocity`);
+- the same gravity — world `Gravity` × the ability's `gravity_scale` (0 = dead straight), read
+  by the node from the spawner (`GetGravity`), never from a scene export;
+- the same ground height (`GetGroundHeight` = `YOffset` + the squad node's height);
+- the same semi-implicit Euler, taken on the same frames: the node is only processed from the
+  frame after it was added, so `_start` takes the first step itself.
+
+They used to disagree — the scene flew the node with gravity 0 while the GPU applied 9.8 — so
+damage landed short of the shot you could see.
+
+`ballistic_velocity` solves the analytic parabola, which the per-tick Euler step undershoots by
+`g·dt/2` per second of flight; `aim_velocity` adds that to the vertical speed, which makes the
+stepped path pass through the analytic one at every tick, so a lobbed shell lands where aimed.
+
+### Drawing
+
+The node steps on physics frames but draws in `_process`, lerping between its last two stepped
+positions by `Engine.get_physics_interpolation_fraction()`. At 80 m/s a shot covers 1.3 m per
+60 Hz tick; drawn only on physics frames, a stream of shots hopped in step every other rendered
+frame and read as a static dotted grid.
+
+### Collision (projectile_compute.glsl)
+
+Each frame the GPU sweeps the projectile's path — cut short where it meets the ground —
+against every body it could touch: the grid cells around the path (grown by the projectile's
+radius plus `BodyRadius`, pushed as `body_radius`) and the airborne bucket. It hits the body met
+**earliest along the path** (`contact_t`, a segment-vs-sphere test) and stops at the point of
+contact, which is what C# reports as the hit position. The old test checked only the end of each
+step and took the first body the grid scan happened to reach: fast shots could pass through a
+hog between frames, and hits were biased toward the lowest cell of the scan window, so a stream
+of shots carved the crowd along the grid.
+
+An ability without its own `force_dir` knocks hogs along the projectile's direction of travel
+at impact (for a lob, down and forward — not the direction it was launched in).
+
+### Firing feel and explosions
+
+`fire_interval` (seconds between shots while held), `spread_deg` (aim cone) and
+`speed_variance` (fractional muzzle speed error) are per ability. Firing one identical shot
+per physics frame from one point is what made a held key draw a solid column of evenly spaced
+beads, and a tap a clump of them.
+
+An ability with `explosion_radius > 0` bursts where it lands, on a hog or the ground:
+`ProjectileBase.kill` calls `ProjectilesSpawner.Detonate` → `SquadMultiMeshInstance3D.Detonate`,
+the same shockwave, damage falloff and panic as a dropped bomb (`DropBomb` is now a
+`Detonate` with the bomb exports). `MortarProjectile.tres` (key 6) is the example: lobbed at 55°
+with `gravity_scale` 2.5, bursting over 3.5 m.
 
 ### Kill path (GPU-initiated)
 
@@ -411,10 +475,19 @@ projectile_compute.glsl clears PROJ_FLAG_ALIVE in flags slot
 ### Kill path (lifetime expiry)
 
 ```
-C# _projLifetimes[slot] ticks to zero
-  → Writes _zeroFlagBytes to GPU PROJ_FLAGS offset
-  → Enqueues slot back to _projFreeSlots
+ability.lifetime runs out in flight (nothing hit, ground never reached)
+  ├─ GPU: projectile_compute clears PROJ_FLAG_ALIVE when its lifetime reaches 0
+  ├─ Node: ProjectileBase._step expires it on the same step → expire() → _on_expire()
+  │        (no projectile_impact, no explosion — it hit nothing)
+  └─ C#: _projLifetimes[slot] (lifetime + PROJ_LIFETIME_GRACE) ticks to zero
+       → Writes _zeroFlagBytes to GPU PROJ_FLAGS offset (safety net)
+       → Enqueues slot back to _projFreeSlots
 ```
+
+C# fires **no hit callback** for a lifetime expiry: by then the slot is inside its grace window,
+which `ReclaimGpuKilledProjectiles` skips. So the node has to expire itself — before it did, a
+shot that never came down (aimed toward a far point and tipped upward by spread, or one that got
+no GPU slot) flew on forever.
 
 ### Ability Dictionary (GDScript → C# bridge)
 
@@ -695,10 +768,13 @@ Specifics worth not re-deriving:
 ### Add a new projectile ability
 
 1. Create `projectiles/MyAbility.tres` (class: `ProjectileAbility`).
-2. Set the ability fields: `damage`, `radius`, `force`, `contagion_type`, etc.
+2. Set the ability fields: `damage`, `radius`, `force`, `contagion_type`, etc. For flight:
+   `speed` (direct shots), `gravity_scale`, `launch_angle_deg` (> 0 lobs it onto the target),
+   `spread_deg`, `speed_variance`, `fire_interval`; for a burst on impact, `explosion_*`.
 3. Add a matching input action in Godot's Project Settings → Input Map.
-4. In `Main.gd`, preload the resource and call `spawn_projectile(my_ability)` in
-   `_physics_process`.
+4. In `Main.gd`, preload the resource and, in `_physics_process`, call
+   `spawn_projectile(my_ability)` when the action is held **and**
+   `_ready_to_fire(my_ability)` — that is what applies `fire_interval`.
 5. No C# changes needed unless the ability requires a new GPU field.
 
 ### Add a new GPU body field

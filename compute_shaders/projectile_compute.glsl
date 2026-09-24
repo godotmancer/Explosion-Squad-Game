@@ -5,13 +5,17 @@
 //
 // Each invocation handles one projectile:
 //   1. Skip inactive slots (PROJ_FLAG_ALIVE clear).
-//   2. Integrate 3D position (gravity + velocity).
-//   3. Expire if lifetime ≤ 0 or projectile hits the ground.
-//   4. Query the spatial hash (3×3 XZ neighbourhood) for grounded candidate bodies,
-//      then, if nothing was hit, the airborne bucket for bodies in the air.
-//   5. Sphere-vs-sphere 3D collision check.
-//   6. On hit: apply flat damage, contagion, knockback impulse, teleport via
-//      atomic operations on Body fields. Kill the projectile.
+//   2. Integrate 3D position (gravity × the projectile's own gravity_scale + velocity).
+//   3. Sweep this frame's path, cut short where it meets the ground, against every body
+//      it could touch: grounded bodies from the spatial-hash cells around the path, and
+//      the airborne bucket. The body touched EARLIEST along the path is hit.
+//   4. On hit: apply flat damage, contagion, knockback impulse, teleport via atomic
+//      operations on Body fields, and kill the projectile at the point of contact.
+//      Otherwise kill it where it met the ground, or when its lifetime runs out.
+//
+// Positions are in the squad's simulation space: C# shifts world positions down by the
+// squad node's height on the way in and back up on the way out, so projectiles collide
+// with bodies where the hogs are drawn.
 //
 // Special case — PROJ_FLAG_IS_HOG:
 //   The projectile was thrown by a live hog (source_body ≥ 0).
@@ -89,7 +93,7 @@ struct Projectile {
     uint  flags;          // 18  PROJ_FLAG_ALIVE | PROJ_FLAG_HAS_TELE | PROJ_FLAG_IS_HOG
     float source_body;    // 19  body index as float, -1 = no source
     float teleport_y;     // 20  spawn height for teleport (world Y)
-    float _pad21;         // 21
+    float gravity_scale;  // 21  × world gravity: 0 flies dead straight, 1 falls like a hog would
     float _pad22;         // 22
     float _pad23;         // 23
 };
@@ -113,7 +117,8 @@ layout(push_constant, std430) uniform Params {
     float y_offset;
     uint  frame_stamp;   // frame index mod 65536, as given to spatial_hash_build.glsl
     float time;
-    float pad;
+    float body_radius;   // BodyRadius — how far past a projectile's path a body centre can be
+                         // and still be touched, beyond the projectile's own radius
 };
 
 // ---------------------------------------------------------------------------
@@ -158,6 +163,11 @@ const uint  HASH_AIR_BUCKET       = HASH_TABLE_SIZE;
 const uint  HASH_AIR_MAX          = 4096u;
 const uint  HASH_AIR_ENTRIES_BASE = HASH_TABLE_SIZE * HASH_MAX_PER_CELL;
 
+// Cap on the cells the sweep visits along each axis. A path plus its reach spans 2–3 cells
+// at the speeds used here (80 m/s is 1.3 m a frame); the cap only stops a runaway
+// projectile from looping over half the map, which beyond ~480 m/s would start to skip bodies.
+const int   MAX_SWEEP_CELLS = 6;
+
 // Wrap-around grid, identical in all three shaders — see spatial_hash_build.glsl.
 uint spatial_hash(int cx, int cz) {
     return (uint(cx) & (HASH_GRID_W - 1u)) + (uint(cz) & (HASH_GRID_H - 1u)) * HASH_GRID_W;
@@ -174,29 +184,36 @@ void infect(int i, uint t, uint new_expiry, uint dps_u, uint now_u) {
         atomicMax(bodies[i].contagion_dps_u[t], dps_u);
 }
 
-// Tests body bi against the projectile and, on contact, applies every ability to it and
-// kills the projectile. Returns whether it hit.
-bool try_hit(inout Projectile proj, int bi) {
-    if (bi < 0 || bi >= num_bodies) return false;
+// How far along this frame's path — from p0, by d — the projectile first touches body bi, as a
+// fraction t of the step in [0, 1]; negative if it does not touch it this frame. A standard
+// segment-vs-sphere test on the combined radius, so a fast projectile cannot pass through a
+// body between two frames, and among several bodies in reach the one met first can be told
+// apart from the one merely found first.
+float contact_t(vec3 p0, vec3 d, float proj_radius, int bi) {
+    if (bi < 0 || bi >= num_bodies) return -1.0;
 
-    // Read only the fields the collision test needs — loading the whole Body struct per
-    // candidate wastes memory bandwidth in this hot loop (up to 9 cells ×
-    // HASH_MAX_PER_CELL candidates).
-    if (bodies[bi].health <= 0.0) return false;
+    // Read only the fields the test needs — loading the whole Body struct per candidate
+    // wastes memory bandwidth in this hot loop.
+    if (bodies[bi].health <= 0.0) return -1.0;
 
-    // 3D sphere vs body position + height
-    float dx = proj.pos_x - bodies[bi].position.x;
-    float dz = proj.pos_z - bodies[bi].position.y; // body.position.y == world Z
-    float dy = proj.pos_y - bodies[bi].height;
-    float dist2 = dx*dx + dz*dz + dy*dy;
-    float comb_r = proj.radius + bodies[bi].radius;
+    vec3  c  = vec3(bodies[bi].position.x, bodies[bi].height, bodies[bi].position.y); // position.y == world Z
+    float r  = proj_radius + bodies[bi].radius;
+    vec3  m  = p0 - c;
+    float mc = dot(m, m) - r * r;
+    if (mc <= 0.0) return 0.0;        // already touching where this step starts
 
-    if (dist2 >= comb_r * comb_r) return false;
+    float a = dot(d, d);
+    float b = dot(m, d);
+    if (a < 1e-12 || b >= 0.0) return -1.0; // not moving, or moving away from it
+    float disc = b * b - a * mc;
+    if (disc < 0.0) return -1.0;       // passes it by
+    float t = (-b - sqrt(disc)) / a;
+    return t <= 1.0 ? t : -1.0;
+}
 
-    // ==================================================================
-    // HIT — apply all projectile abilities atomically
-    // ==================================================================
-
+// Applies every ability of the projectile to body bi, which it has just touched, and kills
+// the projectile. proj's position must already be the point of contact.
+void apply_hit(inout Projectile proj, int bi) {
     // --- Flat damage ---
     float dmg = proj.damage;
     if ((proj.flags & PROJ_FLAG_IS_HOG) != 0u && proj.source_body >= 0.0) {
@@ -225,9 +242,17 @@ bool try_hit(inout Projectile proj, int bi) {
 
     // --- Knockback impulse ---
     if (proj.force > 0.0) {
-        atomicAdd(bodies[bi].impulse_x, int(proj.force_dir_x * proj.force * IMPULSE_SCALE));
-        atomicAdd(bodies[bi].impulse_z, int(proj.force_dir_z * proj.force * IMPULSE_SCALE));
-        atomicAdd(bodies[bi].impulse_y, int(proj.force_dir_y * proj.force * IMPULSE_SCALE));
+        // An ability without its own knockback direction pushes the way the projectile is
+        // travelling when it lands — which for a lobbed shot is down and forward, not the
+        // up-and-forward it was launched at.
+        vec3 dir = vec3(proj.force_dir_x, proj.force_dir_y, proj.force_dir_z);
+        if (dot(dir, dir) < 1e-6) {
+            vec3 v = vec3(proj.vel_x, proj.vel_y, proj.vel_z);
+            dir = dot(v, v) > 1e-6 ? normalize(v) : vec3(0.0);
+        }
+        atomicAdd(bodies[bi].impulse_x, int(dir.x * proj.force * IMPULSE_SCALE));
+        atomicAdd(bodies[bi].impulse_z, int(dir.z * proj.force * IMPULSE_SCALE));
+        atomicAdd(bodies[bi].impulse_y, int(dir.y * proj.force * IMPULSE_SCALE));
 
         // Set flee origin (best-effort direct write — racy under multiple simultaneous hits,
         // but all competing values are nearby, so any winner gives correct flee direction)
@@ -250,9 +275,7 @@ bool try_hit(inout Projectile proj, int bi) {
         }
     }
 
-    // Kill projectile — main() writes it back
     proj.flags &= ~PROJ_FLAG_ALIVE;
-    return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -263,41 +286,56 @@ void main() {
     Projectile proj = projectiles[id];
     if ((proj.flags & PROJ_FLAG_ALIVE) == 0u) return;
 
-    // Decrement lifetime and integrate the 3D position under gravity.
+    // Decrement lifetime and integrate the 3D position under this projectile's gravity
+    // (semi-implicit Euler, matched step for step by ProjectileBase.gd).
+    vec3 p0 = vec3(proj.pos_x, proj.pos_y, proj.pos_z);
     proj.lifetime -= delta_time;
-    proj.vel_y    -= gravity * delta_time;
+    proj.vel_y    -= gravity * proj.gravity_scale * delta_time;
     proj.pos_x    += proj.vel_x * delta_time;
     proj.pos_y    += proj.vel_y * delta_time;
     proj.pos_z    += proj.vel_z * delta_time;
+    vec3 d = vec3(proj.pos_x, proj.pos_y, proj.pos_z) - p0;
 
-    // Expire when its time runs out or it strikes the ground — kills zombie
-    // projectiles burning GPU time. The body dies this frame either way; a dead
-    // projectile is skipped everywhere, so the extra integration step is harmless.
-    if (proj.lifetime <= 0.0 || proj.pos_y < y_offset) {
-        proj.flags &= ~PROJ_FLAG_ALIVE;
-        projectiles[id] = proj;
-        return;
+    // The path this frame ends where it meets the ground, if it does: nothing past that
+    // point can be hit.
+    float t_end = 1.0;
+    bool  grounded = proj.pos_y < y_offset;
+    if (grounded) {
+        t_end = d.y < 0.0 ? clamp((y_offset - p0.y) / d.y, 0.0, 1.0) : 0.0;
     }
+    vec3 p_end = p0 + d * t_end;
 
     // ------------------------------------------------------------------
-    // Spatial hash collision query — 3×3 XZ neighbourhood (grounded bodies)
+    // Grounded bodies — every spatial-hash cell a body touching the path could stand in:
+    // the path's XZ bounds grown by the projectile's and a body's radius.
     // ------------------------------------------------------------------
-    int cx = int(floor(proj.pos_x / HASH_CELL_SIZE));
-    int cz = int(floor(proj.pos_z / HASH_CELL_SIZE));
+    float reach = proj.radius + body_radius;
+    int cx0 = int(floor((min(p0.x, p_end.x) - reach) / HASH_CELL_SIZE));
+    int cz0 = int(floor((min(p0.z, p_end.z) - reach) / HASH_CELL_SIZE));
+    int cx1 = min(int(floor((max(p0.x, p_end.x) + reach) / HASH_CELL_SIZE)), cx0 + MAX_SWEEP_CELLS - 1);
+    int cz1 = min(int(floor((max(p0.z, p_end.z) + reach) / HASH_CELL_SIZE)), cz0 + MAX_SWEEP_CELLS - 1);
 
-    bool hit = false;
+    // Keep the body met EARLIEST along the path, not the first one the scan happens to
+    // reach. Taking the first found biased every hit toward the lowest cell of the scan
+    // window, so a stream of shots carved the crowd along the grid.
+    float best_t  = 2.0;
+    int   best_bi = -1;
 
     // x innermost, matching the grid layout (adjacent buckets along x).
-    for (int dcz = -1; dcz <= 1 && !hit; dcz++) {
-        for (int dcx = -1; dcx <= 1 && !hit; dcx++) {
-
-            uint bucket = spatial_hash(cx + dcx, cz + dcz);
-            uint stored  = hash_counts[bucket];
+    for (int cz = cz0; cz <= cz1; cz++) {
+        for (int cx = cx0; cx <= cx1; cx++) {
+            uint bucket = spatial_hash(cx, cz);
+            uint stored = hash_counts[bucket];
             if ((stored >> HASH_STAMP_SHIFT) != frame_stamp) continue; // not written this frame
             uint count = min(stored & HASH_COUNT_MASK, HASH_MAX_PER_CELL);
 
-            for (uint k = 0u; k < count && !hit; k++) {
-                hit = try_hit(proj, int(hash_entries[bucket * HASH_MAX_PER_CELL + k]));
+            for (uint k = 0u; k < count; k++) {
+                int   bi = int(hash_entries[bucket * HASH_MAX_PER_CELL + k]);
+                float t  = contact_t(p0, d, proj.radius, bi);
+                if (t >= 0.0 && t <= t_end && t < best_t) {
+                    best_t  = t;
+                    best_bi = bi;
+                }
             }
         }
     }
@@ -305,17 +343,36 @@ void main() {
     // ------------------------------------------------------------------
     // Airborne bodies — not in the grid, so without this a hog in the air could not be
     // hit at all. The bucket is a flat list, but it only holds the hogs currently in the
-    // air (hundreds at most in practice), and it is only scanned when nothing on the
-    // ground was hit.
+    // air (hundreds at most in practice).
     // ------------------------------------------------------------------
-    if (!hit) {
-        uint stored = hash_counts[HASH_AIR_BUCKET];
-        if ((stored >> HASH_STAMP_SHIFT) == frame_stamp) {
-            uint count = min(stored & HASH_COUNT_MASK, HASH_AIR_MAX);
-            for (uint k = 0u; k < count && !hit; k++) {
-                hit = try_hit(proj, int(hash_entries[HASH_AIR_ENTRIES_BASE + k]));
+    uint air = hash_counts[HASH_AIR_BUCKET];
+    if ((air >> HASH_STAMP_SHIFT) == frame_stamp) {
+        uint count = min(air & HASH_COUNT_MASK, HASH_AIR_MAX);
+        for (uint k = 0u; k < count; k++) {
+            int   bi = int(hash_entries[HASH_AIR_ENTRIES_BASE + k]);
+            float t  = contact_t(p0, d, proj.radius, bi);
+            if (t >= 0.0 && t <= t_end && t < best_t) {
+                best_t  = t;
+                best_bi = bi;
             }
         }
+    }
+
+    if (best_bi >= 0) {
+        // Stop at the point of contact: that is where C# reports the hit, and where the
+        // flee origin and a lobbed shot's burst are placed.
+        vec3 hit = p0 + d * best_t;
+        proj.pos_x = hit.x;
+        proj.pos_y = hit.y;
+        proj.pos_z = hit.z;
+        apply_hit(proj, best_bi);
+    } else if (grounded) {
+        proj.pos_x = p_end.x;
+        proj.pos_y = p_end.y;
+        proj.pos_z = p_end.z;
+        proj.flags &= ~PROJ_FLAG_ALIVE;
+    } else if (proj.lifetime <= 0.0) {
+        proj.flags &= ~PROJ_FLAG_ALIVE;
     }
 
     // Write back updated projectile (position, velocity, lifetime, flags)
