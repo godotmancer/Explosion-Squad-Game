@@ -211,7 +211,7 @@ mechanism — it preserves the public API and requires no scene-file changes.
 | `Obstacles.cs` | Obstacle cache, `ExtractObstacles`, `EmitObstacleDataArray/List`, `WriteObstacle`, `ComputeMinObb`, `DecomposeTrimeshFootprint`, `ObstacleSlotCount`, `FindCollisionShapes`, `UpdateObstacleBuffer` |
 | `Projectiles.cs` | `SpawnProjectile`, `UploadPendingProjectiles`, `UpdateProjectileLifetimes`, `RegisterProjectileHitCallback`, `WriteProjectilePush` |
 | `Bombs.cs` | `DrainDeathFxQueue`, `OnDeathFxFinished`, `OnHogDied`, `DropBomb`, `UpdateBombBuffer` |
-| `TriggerZones.cs` | `ProcessTriggerZones`, `DamageHogViaBuffer`, `ScanForTriggers`, `GetTriggerBounds`, `IsInsideCircle/OBB`, `TriggerKey` |
+| `TriggerZones.cs` | `ProcessTriggerZones`, `QueueZoneDamage`, `FlushZoneDamage`, `DamageHogViaBuffer`, `ScanForTriggers`, `GetTriggerBounds`, `IsInsideCircle/OBB`, `TriggerKey` |
 | `Labels.cs` | `_timeSinceLastLabelUpdate` field, `UpdateLabels`, `ClassifyState`, `IsLabelOnScreen` |
 
 **Rule:** all field *declarations* stay in the main `.cs` file, with two deliberate
@@ -230,7 +230,7 @@ game will silently corrupt physics data.
 
 ### GpuBody (physics_compute.glsl `struct Body`)
 
-`BODY_STRIDE = 28` floats. Declared as `[StructLayout(LayoutKind.Sequential, Pack = 4)]`.
+`BODY_STRIDE = 30` floats. Declared as `[StructLayout(LayoutKind.Sequential, Pack = 4)]`.
 The field order in `GpuBody` must exactly match the GLSL struct layout. Adding fields
 requires updating both the C# struct AND the shader, and re-initializing buffer sizes.
 
@@ -244,34 +244,53 @@ compute_shaders/projectile_compute.glsl
 compute_shaders/SquadMultiMeshInstance3D.cs   (struct GpuBody, BODY_STRIDE)
 ```
 
-**Fields owned by atomics.** During the physics dispatch, `state` (14), `contagion_expiry_u`
-(17) and `dps_rate_u` (18) are written through atomics by more than one invocation (neighbours
-spreading contagion). `physics_compute` therefore does **not** write `bodies[id] = self` — that
-would clobber a neighbour's concurrent atomic. It writes 16 explicit fields instead, omitting
-those three plus `radius`, `mass`, `teleport_x/z/y`, `pad7` and `pad3`, which physics never
-modifies. `damage_accum`, `impulse_*` and `body_flags` are accumulated atomically by
-`projectile_compute` in the *previous* dispatch, so physics consumes and zeroes them with plain
-stores. If you add a body field, decide which category it is in and update that write block
-accordingly.
+**Fields owned by atomics.** During the physics dispatch, `contagion_expiry_u[3]` (floats
+16–18) and `contagion_dps_u[3]` (19–21) are written through atomics by more than one invocation
+(neighbours spreading contagion). `physics_compute` therefore does **not** write
+`bodies[id] = self` — that would clobber a neighbour's concurrent atomic. It writes 16 explicit
+fields instead, omitting those two arrays plus `radius`, `mass`, `teleport_x/z/y` and `pad29`,
+which physics never modifies. `damage_accum`, `impulse_*` and `body_flags` are accumulated
+atomically by `projectile_compute` in the *previous* dispatch, so physics consumes and zeroes
+them with plain stores. If you add a body field, decide which category it is in and update that
+write block accordingly.
 
-Slots 7 (`pad7`, formerly `wander_angle`, which is rebuilt every frame and is now a local) and
-27 (`pad3`) are spare. Reuse one before growing `BODY_STRIDE`.
+There is no `state` field: the behaviour bits are rebuilt from scratch every frame and only
+ever leave the GPU through the instance buffer (`INST_STATE`). The C# `GpuBody` spells the two
+GLSL arrays out as `FireExpiryU`/`PoisonExpiryU`/`DrunkExpiryU` and `FireDpsU`/`PoisonDpsU`/
+`DrunkDpsU`, in that order.
+
+`pad29` only keeps the size a multiple of 8 bytes: the struct's `vec2` members give it 8-byte
+alignment in std430, while C#'s `Pack = 4` would not pad, so an odd float count would make the
+two strides disagree. A new float field can take its place; beyond that, grow `BODY_STRIDE`
+two at a time.
 
 ### Contagion encoding
 
-`contagion_expiry_u` is an **absolute expiry timestamp** (`time × CONT_TIME_SCALE`, 256), not
-a countdown. It is only ever raised, via `atomicMax`. This is what makes it safe under
-concurrent writes — a decrementing timer cannot be expressed with a single commutative atomic,
-and the earlier countdown version had a bug where `max(local_decremented, stored)` restored the
-pre-decrement value every frame, so contagion never expired at all.
+Each contagion type — `CONT_FIRE`, `CONT_POISON`, `CONT_DRUNK`, indices 0–2 — has its own
+entry in `contagion_expiry_u[]` and `contagion_dps_u[]`, so each runs on its own clock and deals
+its own damage. They used to share one expiry and one DPS, so a drunk hog (50 s) that caught
+fire burned — and spread fire — for the whole drunk window.
 
-Consequences to preserve:
+The expiry is an **absolute timestamp** (`time × CONT_TIME_SCALE`, 256), not a countdown. It
+is only ever raised, via `atomicMax`. This is what makes it safe under concurrent writes — a
+decrementing timer cannot be expressed with a single commutative atomic, and an earlier
+countdown version had a bug where `max(local_decremented, stored)` restored the pre-decrement
+value every frame, so contagion never expired at all.
 
-- `cont_active` is `self.contagion_expiry_u > now_u`. Never test for zero.
-- Contagion **type bits are sticky**. They are cleared only by the *first* infector — the
-  invocation whose `atomicMax` observes `prev_expiry <= now_u` — which then clears the type
-  mask and DPS before OR-ing its own in. Clearing them anywhere else races with a neighbour
-  that has just set a bit and wipes it while the raised expiry survives.
+All infection goes through `infect()`, duplicated in physics_compute (spread) and
+projectile_compute (hits) — keep the two identical. Consequences to preserve:
+
+- A type is live while `contagion_expiry_u[t] > now_u`. Never test for zero.
+- Live types sum their DPS. Within a type the DPS is the strongest infection's (`atomicMax`),
+  except that the *first* infector — the invocation whose `atomicMax` on the expiry observes
+  `prev_expiry <= now_u` — replaces it with `atomicExchange`, because the value left there
+  belongs to an outbreak that has lapsed. A same-type infector racing the exchange can lose its
+  DPS to the winner's for that outbreak; accepted, since infections of one type normally carry
+  the same DPS.
+- The `STATE_ON_FIRE / POISONED / DRUNK` bits are **derived** every frame from the live types
+  (`STATE_ON_FIRE << t`), never stored or set by another invocation. So they clear on the frame
+  their type lapses, and `HogDied`'s `stateBits` (which `DrawableGround.gd` colours the death
+  decal by) are exact. A type a neighbour hands a hog mid-dispatch shows up a frame later.
 - Spread hands the neighbour a *fraction* of the parent's remaining time
   (`CONTAGION_SPREAD_DECAY = 0.6`), capped per type (`FIRE_SPREAD_MAX_DUR`,
   `POISON_SPREAD_MAX_DUR`) and floored at `CONTAGION_MIN_SPREAD_DUR = 0.35`. That floor is
@@ -309,8 +328,17 @@ are float offsets, the GLSL constants are vec4 offsets.
 | `HASH_MAX_PER_CELL` | 64 | Query loop runs `count` times, not this many |
 | `HASH_CELL_SIZE` | 2.0 | GLSL-only |
 | `HASH_STAMP_MASK` | `0xFFFF` | Bucket word is `(stamp << 16) \| count`; see "Frame stamp" in §5 |
-| `HASH_OVERFLOW_SLOT` | `HASH_TABLE_SIZE` | One extra uint past the table; cannot collide with a real bucket |
-| `HASH_COUNTS_BUFFER_SIZE` | `(HASH_TABLE_SIZE + 1) * 4` | The `+ 1` is the overflow slot |
+| `HASH_AIR_BUCKET` | `HASH_TABLE_SIZE` | Count word of the airborne list (below); `spatial_hash()` never returns it |
+| `HASH_AIR_MAX` | 4096 | Airborne list capacity; its entries follow the grid's |
+| `HASH_OVERFLOW_SLOT` | `HASH_TABLE_SIZE + 1` | Overflow counter after both; cannot collide with a real bucket |
+| `HASH_COUNTS_BUFFER_SIZE` | `(HASH_TABLE_SIZE + 2) * 4` | Grid words, airborne word, overflow counter |
+| `HASH_ENTRIES_BUFFER_SIZE` | `(HASH_TABLE_SIZE * 64 + HASH_AIR_MAX) * 4` | Grid entries, then the airborne list |
+
+**Airborne bodies are not in the grid.** Physics never pairs a grounded hog with an airborne one
+(its neighbour scan skips them), so they would only cost it candidates and eat into per-cell
+capacity. The build puts them in one extra bucket instead — a flat list stamped and counted like
+any grid bucket — and `projectile_compute` scans it whenever nothing on the ground was hit. Before
+that list existed, a hog in the air could not be hit by anything.
 
 Despite the name, `spatial_hash()` is a **wrap-around grid**, not a hash: cell `(cx, cz)` maps to
 bucket `(cx mod 256) + (cz mod 128) × 256`. Two cells share a bucket only when they are a whole
@@ -323,13 +351,14 @@ in all three shaders; keep them identical.
 
 Oversizing the table is free at runtime, not just cheap: the frame-stamp scheme means nothing
 ever iterates the table, so a bucket no body lands in is never touched. The only cost is the
-fixed allocation (128 KB counts + 8 MB entries). This is why it is a constant rather than
+fixed allocation (~128 KB counts + ~8 MB entries). This is why it is a constant rather than
 scaling with body count — a game starting with five hogs pays the VRAM and zero per-frame time.
 
 The count half of a bucket word keeps rising past `HASH_MAX_PER_CELL` for overflowed inserts,
 so it only spills into the stamp at 65 536 inserts into one 2 m cell in a single frame.
 
-Per-cell overflow is a graceful no-op (the body is invisible as a neighbour for one frame) but
+Per-bucket overflow is a graceful no-op (the body is invisible as a neighbour — or, past
+`HASH_AIR_MAX` hogs in the air, to projectiles — for one frame) but
 is **counted**, not silent: `atomicAdd(hash_counts[HASH_OVERFLOW_SLOT], 1u)`. Set the
 `DebugHashOverflow` export to have C# sample it at 1 Hz. Non-zero means raise
 `HASH_MAX_PER_CELL` or shrink `HASH_CELL_SIZE`. The symptom otherwise — hogs walking through
@@ -341,7 +370,7 @@ each other in a dense pile — is very hard to attribute.
 |--------|------|----------|
 | `spatial_hash_build.glsl` | 16 bytes (4 × float) | `HASH_BUILD_PUSH_SIZE` |
 | `projectile_compute.glsl` | 32 bytes (8 × float) | `PROJ_PUSH_SIZE` |
-| `physics_compute.glsl` | 56 bytes (14 × float) | `PHYSICS_PUSH_SIZE` |
+| `physics_compute.glsl` | 72 bytes (18 × float) | `PHYSICS_PUSH_SIZE` |
 | `compositor_fx/Outline.glsl` | 72 bytes (mat4 64B + vec2 8B) | hardcoded in `Outline.gd` |
 
 Push constant byte arrays are pre-allocated once and reused every frame.
@@ -444,6 +473,24 @@ in `_concaveFootprints`, keyed on the shape resource: the rects are shape-local,
 they survive movement and `InvalidateObstacleCache`, and `GetFaces()` (which
 allocates) stays off the per-frame path for movable trimeshes.
 
+### Two distances to an obstacle
+
+`get_obstacle_surface` takes a `padding` that it adds to the obstacle (on top of its
+`margin`). The two physics passes use it differently, on purpose:
+
+- **Soft steering** pads by the body radius, so its distance is the gap at the hog's *edge*
+  — what `OBSTACLE_DETECT_RADIUS` is measured against.
+- **The hard (PBD) contact** pads by nothing and measures from the hog's *centre*, then adds
+  how far the **drawn** hog reaches toward the obstacle: the support distance of the mesh's
+  XZ footprint (`footprint_min/max` push constants, measured from `Multimesh.Mesh.GetAabb()`
+  in `SetupMultiMesh`), turned by the hog's facing, never less than `BodyRadius`. `BodyRadius`
+  is only the spacing between hogs and is much smaller than the mesh (0.15 vs a 0.5 × 0.75 box),
+  so a contact built on it lets the mesh sink into walls. The old code padded by the radius
+  twice, which happened to hide most of that: measured against the CircularPancake with the
+  0.5 × 0.75 box, 3 of 37 boxes sat up to 9.7 cm inside it; with the footprint, none, and the
+  closest rests at the 5 cm margin. Swapping the hog mesh needs no code change. Friction still
+  grows with overlap depth, so hogs slide along walls instead of sticking.
+
 ---
 
 ## 10. Signal Architecture
@@ -531,6 +578,11 @@ Mutating a shared resource directly changes it for every future spawn.
 it does not take effect until `Submit()`. Calling it *after* `Sync()` in the same
 frame means the next frame sees the update. This is the expected pattern for
 `DamageHogViaBuffer` and projectile reclaim writes.
+
+A write *replaces* the bytes it covers; the queue does not merge two writes to the same word.
+`DamageHogViaBuffer` relies on physics zeroing `damage_accum` every frame, so it must run at
+most once per hog per frame — trigger zones sum their damage per hog with `QueueZoneDamage` and
+write it once in `FlushZoneDamage`. Two direct calls in one frame keep only the last.
 
 ### Uniform set lifecycle
 
@@ -820,19 +872,14 @@ when calculating buffer sizes or work group counts.
 
 ### Never write `bodies[id] = self` in physics_compute
 
-Three fields are atomic-owned and written by other invocations concurrently (§7). A wholesale
-struct store clobbers them. The shader writes 16 named fields instead. The same reasoning
-applies to the state word: it is committed as
+The two contagion arrays are atomic-owned and written by other invocations concurrently (§7). A
+wholesale struct store clobbers them. The shader writes 16 named fields instead.
 
-```glsl
-atomicAnd(bodies[id].state, CONTAGION_MASK);          // keep contagion bits, clear the rest
-uint final_state = atomicOr(bodies[id].state, st) | st;
-```
-
-not as a plain assignment, and *not* as `atomicAnd(state, keep_contagion)` computed from a local
-snapshot — that variant was tried and was itself racy, wiping a bit a neighbour had just set
-while the raised expiry survived, which presented as "contagion infects but instantly
-disappears".
+Do not bring back a stored, shared `state` word for the contagion bits. It needed an
+`atomicAnd`/`atomicOr` dance so neighbours' bits survived, which forced those bits to be sticky
+past expiry; every attempt to clear them from a local snapshot raced a neighbour setting one
+("contagion infects but instantly disappears"). Deriving the bits from the per-type expiries
+each frame removed the problem instead of guarding it.
 
 ### Work group count uses NumBodies, not InstanceCount
 
@@ -861,8 +908,9 @@ Before marking any task complete:
       `struct Body` copies updated to match (§7)
 - [ ] If a GPU buffer write was added → it goes through `EnqueueGpuWrite`, not a direct
       `_rd.BufferUpdate` (§5)
-- [ ] If contagion logic changed → contagion bits stay sticky, expiry is only ever raised via
-      `atomicMax`, and the chain still terminates (§7)
+- [ ] If contagion logic changed → every infection goes through `infect()` (both copies
+      identical), each type's expiry is only ever raised via `atomicMax`, the state bits are
+      still derived from the live types, and the chain still terminates (§7)
 - [ ] If a new buffer RID field was added → `Dispose()` frees it; `SpawnHogs`
       rebuilds its uniform set
 - [ ] If a new per-frame code path was added in C# → no heap allocations

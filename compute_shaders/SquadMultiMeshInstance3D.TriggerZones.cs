@@ -96,7 +96,7 @@ public sealed partial class SquadMultiMeshInstance3D
         {
           case TriggerEffect.Damage:
             // Damage re-fires on every re-entry; no permanent immunity needed.
-            DamageHogViaBuffer(i, zone.Value);
+            QueueZoneDamage(i, zone.Value);
             emitSignal = true;
             break;
 
@@ -148,6 +148,8 @@ public sealed partial class SquadMultiMeshInstance3D
       _zoneOccupantsScratch = prevOccupants;
     }
 
+    FlushZoneDamage();
+
     // Spawn deferred hogs and immediately mark their indices as immune to
     // the originating zone so they cannot re-trigger it next frame.
     foreach (var (zoneIdx, pos, count) in _pendingTriggerSpawns)
@@ -187,10 +189,32 @@ public sealed partial class SquadMultiMeshInstance3D
   private readonly byte[] _damageEncodeBytes = new byte[sizeof(uint)];
 
   /// <summary>
+  /// Adds zone damage for a hog to this pass's running total. Nothing is written until
+  /// <see cref="FlushZoneDamage"/>, so a hog entering several damage zones in one frame takes
+  /// all of them.
+  /// </summary>
+  private void QueueZoneDamage(int index, float damage) =>
+    CollectionsMarshal.GetValueRefOrAddDefault(_pendingZoneDamage, index, out _) += damage;
+
+  /// <summary>Writes each queued hog's summed zone damage, once per hog.</summary>
+  private void FlushZoneDamage()
+  {
+    foreach (var (index, damage) in _pendingZoneDamage)
+    {
+      DamageHogViaBuffer(index, damage);
+    }
+
+    _pendingZoneDamage.Clear();
+  }
+
+  /// <summary>
   /// Applies flat damage to a hog by writing to its <c>damage_accum</c> field
   /// in the physics buffer. The GPU physics shader reads and clears this accumulator
   /// each frame (DAMAGE_SCALE = 256), applying the result to health.
-  /// The write is queued and takes effect on the next physics frame.
+  /// The write is queued and takes effect on the next physics frame. It REPLACES the
+  /// word rather than adding to it — fine because physics zeroes it every frame and this
+  /// lands before the projectile pass adds its hits — so call it at most once per hog per
+  /// frame; zone damage goes through <see cref="QueueZoneDamage"/> for exactly that reason.
   /// </summary>
   private void DamageHogViaBuffer(int index, float damage)
   {
