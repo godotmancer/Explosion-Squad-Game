@@ -11,6 +11,27 @@ public sealed partial class SquadMultiMeshInstance3D : MultiMeshInstance3D
   [Export]
   public bool ShowHogs { get; set; } = true;
 
+  /// <summary>
+  /// Draw only the hogs inside the camera's view. Godot culls a MultiMesh as one object, so
+  /// without this every live hog goes through every pass — depth prepass, colour, each
+  /// directional cascade and every shadow-casting light's shadow map — on screen or not.
+  /// The cull is against the viewport's current camera, so turn it off if a second camera or
+  /// viewport has to see the crowd.
+  /// </summary>
+  [Export]
+  public bool FrustumCulling { get; set; } = true;
+
+  /// <summary>
+  /// How far outside the view, in metres beyond a hog's own size, hogs are still drawn, so
+  /// that one just off-screen still casts its shadow into view. The sun's hog shadows reach
+  /// ~0.1 m; this is for the low positional lights, whose shadows run longer.
+  /// </summary>
+  [Export]
+  public float FrustumCullMargin { get; set; } = 2.0f;
+
+  /// <summary>Live hogs in the latest readback, whether drawn or culled.</summary>
+  public int AliveHogCount => _aliveHogCount;
+
   [Export]
   public int NumBodies { get; set; } = 5000;
 
@@ -556,9 +577,25 @@ public sealed partial class SquadMultiMeshInstance3D : MultiMeshInstance3D
   private bool _gpuTickInFlight;
   private int _gpuTickBodies;
 
-  // Hogs in _transformFloats after the last compaction, i.e. what the MultiMesh is drawing.
-  // ApplyPhysicsGrowth re-uploads them after resizing the MultiMesh.
-  private int _visibleHogCount;
+  // The latest transform readback, kept for DrawHogs. A tick reads the hogs back; drawing them
+  // happens once per rendered frame in _Process, against the camera as it is then.
+  private byte[] _drawReadback;
+  private int _aliveHogCount; // live hogs in _drawReadback
+
+  // Something new to draw: a readback, a MultiMesh resize, ShowHogs turned back on. Otherwise
+  // DrawHogs uploads again only when the camera or the squad node has moved since the last draw.
+  private bool _hogsDrawDirty;
+  private Transform3D _drawnView;
+  private Projection _drawnProjection;
+  private Transform3D _drawnNodeTransform;
+
+  // View-frustum planes in the squad node's space: xyz is the normal, pointing into the view,
+  // and w the offset, so that dot(xyz, p) + w is a hog's signed distance in world metres.
+  private readonly Vector4[] _cullPlanes = new Vector4[6];
+
+  // Radius around a hog's origin that holds its whole mesh, however it is turned. The cull
+  // margin and the MultiMesh AABB are grown by it. Measured in SetupMultiMesh.
+  private float _hogBoundingRadius;
 
   // Per-body state tracking (allocated to _bodyCapacity, grown in SpawnHogs)
   private byte[] _hogStates; // current HogBehaviourState per body
@@ -640,10 +677,6 @@ public sealed partial class SquadMultiMeshInstance3D : MultiMeshInstance3D
     if (@event.IsActionPressed("show_hogs"))
     {
       ShowHogs = !ShowHogs;
-      if (!ShowHogs)
-      {
-        Multimesh.VisibleInstanceCount = 0;
-      }
     }
 
     if (@event.IsActionPressed("toggle_labels"))
@@ -706,6 +739,20 @@ public sealed partial class SquadMultiMeshInstance3D : MultiMeshInstance3D
           forceDir.Z * _rndGen.RandfRange(5f, 15f)
         )
       );
+    }
+
+    // After this frame's physics ticks, so the latest readback is drawn — once, however many
+    // ticks ran — and with the camera where this frame will render from.
+    if (ShowHogs)
+    {
+      DrawHogs();
+    }
+    else if (Multimesh.VisibleInstanceCount != 0)
+    {
+      // However ShowHogs was turned off (key, inspector or script): stopping the uploads alone
+      // would leave the last crowd drawn. Draw in full again once it is turned back on.
+      Multimesh.VisibleInstanceCount = 0;
+      _hogsDrawDirty = true;
     }
   }
 
@@ -812,9 +859,10 @@ public sealed partial class SquadMultiMeshInstance3D : MultiMeshInstance3D
 
   /// <summary>
   /// Waits for the tick submitted by the previous <see cref="_PhysicsProcess"/> and consumes
-  /// its results: the hash stamp, the transform readback, deaths, labels, trigger zones and the
-  /// MultiMesh upload. Anything it queues (zone damage, stamp-wrap clears) is flushed before the
-  /// next dispatch, just as when this ran straight after that tick's own Sync.
+  /// its results: the hash stamp, the transform readback, deaths, labels and trigger zones. The
+  /// readback is kept for <see cref="DrawHogs"/>. Anything it queues (zone damage, stamp-wrap
+  /// clears) is flushed before the next dispatch, just as when this ran straight after that
+  /// tick's own Sync.
   /// </summary>
   private void CompleteGpuTick(double delta)
   {
@@ -865,43 +913,31 @@ public sealed partial class SquadMultiMeshInstance3D : MultiMeshInstance3D
       DrainDeathFxQueue();
     }
 
-    // Compact directly from GPU readback into _transformFloats — only alive
-    // instances are copied, skipping the previous full-buffer BlockCopy.
-    // STATE_DEAD is the authoritative source for death; this loop runs every frame
-    // regardless of whether labels are shown, so OnHogDied always fires.
+    // STATE_DEAD is the authoritative source for death. This runs every tick, whether or not
+    // hogs are drawn, so OnHogDied always fires; drawing is DrawHogs' job, once per frame.
     var aliveCount = 0;
-    var dst = _transformFloats.AsSpan();
     for (var i = 0; i < _gpuTickBodies; i++)
     {
       var src = i * INSTANCE_STRIDE;
       var stateBits = BitConverter.SingleToUInt32Bits(gpuFloats[src + INST_STATE]);
-      if ((stateBits & STATE_DEAD) != 0)
+      if ((stateBits & STATE_DEAD) == 0)
       {
-        if (_deadHogs.Add(i))
-        {
-          OnHogDied(i, gpuFloats[src + INST_ORIGIN_X], gpuFloats[src + INST_ORIGIN_Z], stateBits);
-          _ = HogLabels?.Call("release_label", i);
-        }
-        continue;
+        aliveCount++;
       }
-
-      gpuFloats
-        .Slice(src, INSTANCE_STRIDE)
-        .CopyTo(dst.Slice(aliveCount * INSTANCE_STRIDE, INSTANCE_STRIDE));
-      aliveCount++;
+      else if (_deadHogs.Add(i))
+      {
+        OnHogDied(i, gpuFloats[src + INST_ORIGIN_X], gpuFloats[src + INST_ORIGIN_Z], stateBits);
+        _ = HogLabels?.Call("release_label", i);
+      }
     }
 
-    _visibleHogCount = aliveCount;
+    _aliveHogCount = aliveCount;
+    _drawReadback = outputBytes;
+    _hogsDrawDirty = true;
 
     if (_triggerZones is { Count: > 0 })
     {
       ProcessTriggerZones(gpuFloats);
-    }
-
-    if (ShowHogs)
-    {
-      Multimesh.VisibleInstanceCount = aliveCount;
-      RenderingServer.MultimeshSetBuffer(Multimesh.GetRid(), _transformFloats);
     }
   }
 

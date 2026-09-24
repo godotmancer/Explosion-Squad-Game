@@ -17,12 +17,18 @@ public sealed partial class SquadMultiMeshInstance3D
     {
       _hogFootprintMin = new Vector2(-BodyRadius, -BodyRadius);
       _hogFootprintMax = new Vector2(BodyRadius, BodyRadius);
+      _hogBoundingRadius = BodyRadius;
       return;
     }
 
     var aabb = mesh.GetAabb();
     _hogFootprintMin = new Vector2(aabb.Position.X, aabb.Position.Z);
     _hogFootprintMax = new Vector2(aabb.End.X, aabb.End.Z);
+
+    // The hog's farthest corner from its origin. A hog's transform only turns it about Y and
+    // moves it (physics_compute's instance write), so this holds the mesh however it faces.
+    var corner = aabb.Position.Abs().Max(aabb.End.Abs());
+    _hogBoundingRadius = Math.Max(corner.Length(), BodyRadius);
   }
 
   private void SetupCompute()

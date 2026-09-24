@@ -39,22 +39,23 @@ the simulation keeps real time up to about **125,000**.
 shadowed. The HUD counts the 67,226 still standing fifteen seconds in.</sub>
 </div>
 
-Measured on an Apple M4 Pro (Metal, Forward+), with `Main.tscn` as shipped and the hogs scattered
-across the map:
+Measured on an Apple M4 Pro (Metal, Forward+), with `Main.tscn` as shipped, the default camera
+and the hogs scattered across the map. Roughly half of them are in view. "Before culling" is
+the previous version, measured in the same session:
 
-| Hogs | Frame time, as shipped | Simulation only (hogs hidden) | Real time? |
-|---:|---|---|:---:|
-| 20,000 | 8.7 ms (116 fps, near the 120 fps display cap) | 8.9 ms | ✅ |
-| 50,000 | 9.4 ms (106 fps) | 8.8 ms | ✅ |
-| 75,000 | 12.8 ms (78 fps) | 8.9 ms | ✅ |
-| 100,000 | 25.8 ms (39 fps) | 10.6 ms (94 fps) | ✅ simulation keeps up, at 39 fps |
-| 125,000 | 61.1 ms (16 fps) | 15.7 ms (64 fps) | ⚠️ simulation keeps up, at 16 fps |
+| Hogs | Frame time, as shipped | Before culling | Simulation only (hogs hidden) | Real time? |
+|---:|---|---|---|:---:|
+| 20,000–75,000 | 8.4 ms (119 fps, the 120 fps display cap) | at the cap | at the cap | ✅ |
+| 100,000 | 10.3 ms (97 fps) | 15.4 ms (65 fps) | at the cap | ✅ |
+| 125,000 | 28 ms (35 fps; 28–47 over two runs) | 52 ms (19 fps) | at the cap | ⚠️ 86–94% |
+| 150,000 | 74 ms (13.5 fps) | 154 ms (6.5 fps) | at the cap | ⚠️ 90% |
 
-Physics runs at a fixed 60 Hz. Once a tick plus drawing the frame no longer fits in 16.7 ms,
-Godot runs extra ticks each frame to catch up, so frame rate drops in steps rather than smoothly;
-past about 125,000 hogs the ticks themselves stop fitting and the simulation falls behind.
+The simulation alone is not the limit: with the hogs hidden, even 150,000 run at the display
+cap. Drawing them is. Physics runs at a fixed 60 Hz, and once a tick plus drawing the frame no
+longer fits in 16.7 ms, Godot runs extra ticks each frame to catch up. So the frame rate drops in
+steps rather than smoothly, and past about 125,000 hogs the simulation starts to fall behind.
 
-Until recently the ceiling was 50,000, and 100,000 hogs ran at 6 fps. Three changes moved it:
+Until recently the ceiling was 50,000, and 100,000 hogs ran at 6 fps. Four changes moved it:
 
 - **Trigger zones in one pass.** The CPU-side zone check tested every hog against each zone in a
   separate pass with a hash lookup per hog, ~10 ms a tick at 100,000 hogs. It is now one pass
@@ -65,6 +66,13 @@ Until recently the ceiling was 50,000, and 100,000 hogs ran at 6 fps. Three chan
 - **Optimised C# in the editor.** Godot runs the Debug build, which normally turns JIT
   optimisation off; the project now turns it on for every build, halving the per-hog CPU loops:
   24 → 39 fps.
+- **Frustum culling.** Godot culls a MultiMesh as one object, so every hog went through every
+  pass, on screen or not: the depth prepass, the colour pass, four sun shadow cascades and the
+  shadow maps of the two other shadowed lights (six faces for the omni light), about 13 passes in
+  all. Now only the hogs the camera can see are drawn, uploaded once per rendered frame with
+  their own bounding box: 65 → 97 fps at 100,000 in the default view (the cheaper upload alone
+  gets it to 76). Zoomed in, only a fifth of the crowd is drawn. These figures were
+  measured the same day as the table; the ones in the bullets above came from a slower session.
 
 ## ✨ What's new
 
@@ -77,6 +85,7 @@ Until recently the ceiling was 50,000, and 100,000 hogs ran at 6 fps. Three chan
 | 🦠 **Contagion that ends** | Fire, poison and drunk each run on their own clock, pass on a shorter dose at every hop, and wear off, taking the colour tint with them. |
 | 🪂 **Airborne hits** | Hogs knocked into the air can now be hit too. |
 | 🧱 **Solid walls** | Hog contacts use the drawn mesh's footprint, so hogs no longer sink into walls, and hollow shapes like the play pen are split into their real walls. |
+| 🎥 **Frustum culling** | Only the hogs the camera can see are drawn. Godot culls a whole MultiMesh or nothing, so every hog used to go through every render and shadow pass whether on screen or not. 100,000 hogs: 65 → 97 fps in the default view, 6.5 → 13.5 fps at 150,000. |
 | 🐖 **Bigger crowds** | Trigger zones checked in one pass, the GPU running a tick ahead of the CPU, and optimised C#: 100,000 hogs now run at 39 fps instead of 6, and the simulation keeps real time up to ~125,000. |
 | 🗺️ **Sharper neighbour grid** | The spatial hash is now a wrap-around grid with a 16-bit frame stamp: no collisions between distant cells, and no stale neighbours left behind. |
 
@@ -162,8 +171,8 @@ flowchart LR
         P --> B["<b>physics_compute</b><br/>boids · obstacles · bombs<br/>fear · contagion spread<br/>→ instance buffer"]
     end
     Q --> H
-    B --> R["Read back live hogs,<br/>compact the dead"]
-    R --> M["One MultiMesh upload<br/>→ one draw call"]
+    B --> R["Read back the hogs,<br/>spot the dead"]
+    R --> M["Cull to the camera's view<br/>→ one MultiMesh upload<br/>→ one draw call"]
 ```
 
 - **Neighbour grid.** Hogs are bucketed into a 256 × 128 wrap-around grid of 2 m cells. Each bucket
@@ -312,6 +321,11 @@ COHESION_RADIUS    = 5.0
 The whole point of this project is that it stays fast. What makes that work:
 
 - **MultiMesh instancing.** All hogs render in one draw call.
+- **Frustum culling.** Godot culls a MultiMesh only as a whole, so the whole crowd went through
+  every pass, shadow maps included. Once per rendered frame, only the hogs in the camera's view
+  (plus a 2 m margin, so off-screen hogs still cast their shadows in) are uploaded, with a custom
+  AABB around them. That AABB also saves Godot rebuilding one from every row of the buffer, which
+  cut the upload from 1.1 to 0.4 ms at 100,000 hogs.
 - **Single-surface baked hog mesh.** The Kenney source `.obj` shipped as 5 surfaces that all used
   the same material, so every hog cost 5 draw calls per pass, doubled by the shadow pass. Baked to
   `assets/animal_hog_merged.tres`: **41.4 → 34.1 ms/frame, ~18% faster, zero visual change.**

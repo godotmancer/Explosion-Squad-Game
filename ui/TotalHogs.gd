@@ -23,6 +23,7 @@ func _score_hit(marker: Marker2D) -> void:
 
 
 func _physics_process(_delta: float) -> void:
+  # Not the MultiMesh's visible_instance_count: that is only the hogs in view (frustum culling)
   text = "%d hogs" % [
-    hogs_mesh_instances.multimesh.visible_instance_count
+    hogs_mesh_instances.AliveHogCount
   ]

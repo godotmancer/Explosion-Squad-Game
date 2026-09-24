@@ -28,12 +28,13 @@ to watch out for* when making changes. Read both before touching anything.
 ## 1. One-Paragraph Mental Model
 
 Explosion Squad game simulates up to ~125 000 hogs entirely on the GPU. Every physics frame the
-CPU first syncs the dispatch it submitted last frame and reads its transform buffer back to update
-the MultiMesh in one RenderingServer call, then drains its deferred GPU command queue, dispatches
-three compute shaders (hash → projectile → physics) in one command list and calls `Submit()` —
-without waiting. The GPU runs one tick behind the CPU.
+CPU first syncs the dispatch it submitted last frame and reads its transform buffer back, then
+drains its deferred GPU command queue, dispatches three compute shaders (hash → projectile →
+physics) in one command list and calls `Submit()` — without waiting. The GPU runs one tick behind
+the CPU. Once per rendered frame, `_Process` uploads the hogs of the latest readback that the
+camera can see to the MultiMesh, in one RenderingServer call.
 The CPU never writes individual hog positions; it only reads them to detect deaths and
-trigger zones.
+trigger zones, and to draw them.
 GDScript handles everything visible (projectile meshes, FX, labels, UI, camera);
 C# handles everything that talks to the GPU. That single boundary — "GPU state lives
 in C#, visual state lives in GDScript" — explains almost every architectural decision
@@ -91,6 +92,7 @@ Explosion-Squad-Game/
 │   ├── SquadMultiMeshInstance3D.Bombs.cs    # Bomb buffer, death FX pool, OnHogDied
 │   ├── SquadMultiMeshInstance3D.TriggerZones.cs # Zone detection, deferred spawns
 │   ├── SquadMultiMeshInstance3D.Labels.cs   # Distance-sorted label assignment
+│   ├── SquadMultiMeshInstance3D.Drawing.cs  # Frustum culling + the MultiMesh upload
 │   ├── physics_compute.glsl                   # Boids, obstacles, bombs, contagion, instance write
 │   ├── projectile_compute.glsl                # Projectile integration + sphere collision
 │   └── spatial_hash_build.glsl                # O(1) spatial hash construction
@@ -142,9 +144,9 @@ CPU                                 GPU
  │   ├─ Sync()                       │
  │   ├─ advance hash frame stamp     │
  │   ├─ BufferGetData(transformBuffer)  ← only CPU read per frame (the rows it dispatched)
- │   ├─ Compact alive instances      │
+ │   ├─ Detect deaths (STATE_DEAD)   │
  │   ├─ ProcessTriggerZones          │  (CPU-side shape tests on transform data)
- │   └─ MultimeshSetBuffer           │  ← only RenderingServer write per frame
+ │   └─ keep the readback for DrawHogs
  │                                   │
  ├─ UpdateProjectileLifetimes etc.   │  (may read GPU buffers: after the Sync above)
  ├─ WritePhysicsPush                 │
@@ -164,6 +166,11 @@ CPU                                 GPU
  │                                   │  instance_buffer[] from its own tail
  ├─ ComputeListEnd()                 │
  └─ Submit()                         │  ← no Sync: runs while the frame is processed + drawn
+
+_Process — once per rendered frame, after that frame's physics ticks
+ └─ DrawHogs()                          latest readback → hogs in the camera's view
+     ├─ MultimeshSetCustomAabb
+     └─ MultimeshSetBuffer               ← the only MultiMesh upload
 ```
 
 **The GPU runs one tick behind.** `_PhysicsProcess` submits its dispatch and returns; the next
@@ -174,6 +181,20 @@ than it used to be; writes still land before the next dispatch exactly as before
 trigger-zone pass and the flush both run between one dispatch's Sync and the next dispatch.
 See the §14 gotcha for what this means for new code.
 
+**Hogs are drawn from `_Process`, culled to the view.** Godot has no per-instance culling: it culls
+a MultiMesh as one object by its AABB, then draws every visible instance in every pass that AABB
+reaches — depth prepass, colour, each directional cascade, and the shadow map of every shadowed
+light in range (six faces for an omni). With `Main.tscn`'s lights that was every live hog about 13
+times a frame, on screen or not. `DrawHogs` (`Drawing.cs`) therefore uploads only the hogs within
+`FrustumCullMargin` (2 m) plus the mesh's bounding radius of the camera's view, and sets a custom
+AABB around them. It runs in `_Process`, after the frame's ticks: it culls against the camera
+the frame is drawn from (culling in the tick would lag the camera by a frame while orbiting, and
+by several in slow motion, when ticks are rarer than frames), and uploads once however many ticks
+the frame ran. It uploads only when there is a new readback or the camera or squad node has moved.
+The test is six plane checks per hog, with planes taken from the camera's projection matrix and
+moved into the squad node's space; it was checked against `Camera3D.GetFrustum()` with zero
+disagreements, perspective and orthographic.
+
 **Critical ordering constraint:** hash build → projectile → physics.
 The projectile shader atomically writes `damage_accum` into `bodies[]` which the
 physics shader reads the same frame. The barrier between them is mandatory.
@@ -181,7 +202,7 @@ physics shader reads the same frame. The barrier between them is mandatory.
 **There is no fourth pass.** `transform_compute.glsl` was deleted; physics_compute writes
 the instance buffer in its tail via binding 5, as five coalesced `vec4` stores, reusing the
 `Body` it already has in registers. Dead bodies take an early-out path that still writes
-their `INSTANCE_CUSTOM` row (so the CPU compaction loop can see `STATE_DEAD`) and skip
+their `INSTANCE_CUSTOM` row (so the CPU death loop can see `STATE_DEAD`) and skip
 everything else. The C# field is still named `_transformBuffer` — the name outlived the
 shader.
 
@@ -216,7 +237,7 @@ entries into neighbour queries. Do not narrow it again.
 
 ## 6. The C# God-Class and Its Partials (to be refactored out)
 
-`SquadMultiMeshInstance3D` is split into 8 `partial class` files. All live in
+`SquadMultiMeshInstance3D` is split into 9 `partial class` files. All live in
 `compute_shaders/`. The class is `sealed`, so `partial` is the only safe split
 mechanism — it preserves the public API and requires no scene-file changes.
 
@@ -230,6 +251,7 @@ mechanism — it preserves the public API and requires no scene-file changes.
 | `Bombs.cs` | `DrainDeathFxQueue`, `OnDeathFxFinished`, `OnHogDied`, `DropBomb`, `UpdateBombBuffer` |
 | `TriggerZones.cs` | `ProcessTriggerZones`, `OnZoneEntered`, `QueueZoneDamage`, `FlushZoneDamage`, `DamageHogViaBuffer`, `ScanForTriggers`, `GetTriggerBounds`, `IsInsideCircle/OBB`, `TriggerKey` |
 | `Labels.cs` | `_timeSinceLastLabelUpdate` field, `UpdateLabels`, `ClassifyState`, `IsLabelOnScreen` |
+| `Drawing.cs` | `DrawHogs` (frustum cull, custom AABB, `MultimeshSetBuffer`), `BuildCullPlanes`, `ToNodeSpace`, `IsOutside` |
 
 **Rule:** all field *declarations* stay in the main `.cs` file, with two deliberate
 exceptions: `_timeSinceLastLabelUpdate` (label-specific state) and everything in
@@ -336,8 +358,8 @@ drawn and reached the GPU's ground 0.25 m under the visible floor.
 
 `INSTANCE_STRIDE = 20` floats per instance = `INSTANCE_VEC4S = 5` vec4 rows, matching Godot's
 row-major MultiMesh layout. Slots 16–19 are `INSTANCE_CUSTOM` (R/G/B/A). Slot 17
-(`INST_HEALTH`) and slot 18 (`INST_STATE`) are read back by the CPU compaction loop and trigger
-zone tests every frame.
+(`INST_HEALTH`) and slot 18 (`INST_STATE`) are read back every frame by the death loop in
+`CompleteGpuTick`, the trigger zone tests and `DrawHogs`.
 
 The shader declares the buffer as `vec4 instances[]` and indexes rows, so the C# float indices
 map as `INST_ROW_CUSTOM = 4` ↔ `INST_CUSTOM_R = 16`. Keep both sides in step: the C# constants
@@ -765,8 +787,14 @@ These are non-negotiable. Do not introduce patterns that violate them.
    guard.
 
 6. **Dead hogs are never removed from the body buffer.** `STATE_DEAD` is the
-   authoritative marker. The compaction loop skips dead bodies when building the
+   authoritative marker. `DrawHogs` skips dead bodies when building the
    MultiMesh buffer. Body indices are permanent for the lifetime of the scene.
+
+6a. **The MultiMesh is uploaded once per rendered frame, by `DrawHogs`, and only with the hogs in
+   view.** Do not upload it from the tick again, and do not turn `FrustumCulling` off to make a
+   count come out right: `Multimesh.VisibleInstanceCount` is the number drawn, `AliveHogCount` the
+   number alive. Keep setting the custom AABB before `MultimeshSetBuffer`, so that Godot does not
+   rebuild one from every row of the buffer (0.36 vs 1.13 ms per upload at 100k).
 
 7. **MaxVisibleLabels = 50.** Label update is throttled to 10 Hz. Do not make label
    updates per-frame or uncapped.
@@ -811,18 +839,35 @@ Specifics worth not re-deriving:
   on a discrete GPU the conclusion would differ.
 - `ShowHogs = false` skips both `MultimeshSetBuffer` and drawing while keeping all compute, the
   Sync and the readback — that is how the compute floor is isolated. Use it rather than
-  guessing.
+  guessing. Until `_Process` zeroed `VisibleInstanceCount` for it, only the `show_hogs` key did:
+  setting the property from a script stopped the uploads and left the last crowd drawn, frozen.
+  The "hidden" figures measured that way (before frustum culling) still included drawing the crowd.
 - ~0.5% of hogs end up inside an obstacle at `PBD_ITERATIONS = 1` in a dense crowd. Pre-existing
   solver behaviour, verified identical with and without the broad-phase.
 
-**Crowd size.** With the box mesh `Main.tscn` now ships, hogs scattered over the map, M4 Pro:
-20k 116 fps, 50k 106 fps, 75k 78 fps, 100k 39 fps (94 fps hidden), 125k 16 fps (64 fps hidden,
-simulation still real time), 150k 6 fps. Before the pipelining and the optimised build, 100k was
-20 fps: pipelining alone took it to 24, the optimised build to 39. With a synced tick, 100k cost
-roughly: GPU dispatch + `Sync` 4–10 ms (grows with crowd density), `BufferGetData` ~1.1 ms,
-compaction ~1 ms (unoptimised), trigger zones ~3 ms (unoptimised; plus 1–3 ms of `HogZoneTriggered`
-handlers while hogs are shown), `MultimeshSetBuffer` ~1.1 ms. Pipelining won less than the idle
-`Sync` suggested, presumably because compute and rendering share the one GPU.
+**Crowd size.** With the box mesh `Main.tscn` now ships, the default camera and hogs scattered
+over the map (about half in view), M4 Pro, as shipped vs the version before frustum culling,
+measured in one session: 20k–75k at the 120 fps display cap either way; 100k 97 fps (65 before);
+125k 28–47 fps (19), simulation at 86–94% of real time; 150k 13.5 fps (6.5), 90%. **With the hogs
+truly hidden, every size up to 150k runs at the display cap: the simulation does not limit the
+crowd, drawing it does.** The same session measured the pre-culling code much faster than an
+earlier one had (65 vs 39 fps at 100k), so compare numbers only within a session, interleaving
+the configurations.
+
+History: before the pipelining and the optimised build, 100k was 20 fps; pipelining alone took it
+to 24, the optimised build to 39 (the earlier session). With a synced tick, 100k cost roughly: GPU
+dispatch + `Sync` 4–10 ms (grows with crowd density), `BufferGetData` ~1.1 ms, compaction ~1 ms
+(unoptimised), trigger zones ~3 ms (unoptimised; plus 1–3 ms of `HogZoneTriggered` handlers while
+hogs are shown), `MultimeshSetBuffer` ~1.1 ms (0.36 ms since the custom AABB). Pipelining won less
+than the idle `Sync` suggested, presumably because compute and rendering share the one GPU.
+
+- **Frustum culling (§5).** The default view draws about half the crowd, a close one a fifth. At
+  100k: 65 fps before, 76 with the per-frame upload and custom AABB but `FrustumCulling` off, 97
+  with it on. In a slower session, interleaved: close view 65 → 88 fps, far 77 → 103. `DrawHogs`
+  itself costs ~1.0 ms at 100k (0.75 ms with culling off), once per rendered frame, where the
+  compaction and upload it replaced ran once per tick, up to 8 times a frame in catch-up. The
+  next lever is the shadow passes: every shadowed light still draws every hog in view, six times
+  for the target marker's omni light.
 
 - **The cliff is the physics catch-up, not linear cost.** Physics is fixed at 60 Hz; once a tick
   plus the frame's drawing exceeds 16.7 ms, Godot runs extra ticks per frame (up to
@@ -1026,14 +1071,15 @@ next one syncs it. Consequences for new code:
 - **Use the readback's count, not `NumBodies`.** Hogs spawned since the dispatch (from `_Process`,
   or by the trigger-zone pass) have no row in the instance buffer yet, and the capacity growth
   they queued is only applied at the next flush — the buffer may be smaller than `NumBodies` rows.
-  The readback covers `_gpuTickBodies`; the compaction loop, `UpdateLabels` and
-  `ProcessTriggerZones` take their count from the span.
-- **Growth re-uploads the MultiMesh.** `ApplyPhysicsGrowth` resizes `Multimesh.InstanceCount`,
-  which clears it, and the next readback is a tick away, so it resizes `_transformFloats` (keeping
-  the last compacted hogs) and uploads it again with `_visibleHogCount`. Without that, the crowd
-  vanished for one frame per growth (11 blank frames over a 10k → 38k spawn run). Note that
-  `Multimesh.VisibleInstanceCount` still reads the old value after the resize, so a test has to
-  look at `RenderingServer.MultimeshGetBuffer` to see the blank frame.
+  The readback covers `_gpuTickBodies`; the death loop, `UpdateLabels`, `ProcessTriggerZones`
+  and `DrawHogs` take their count from the span.
+- **Growth clears the MultiMesh.** `ApplyPhysicsGrowth` resizes `Multimesh.InstanceCount`, which
+  clears it. It runs in a tick, and `DrawHogs` refills the MultiMesh from the last readback in
+  `_Process` before the frame is drawn, so nothing flickers (0 blank frames over a 10k → 38k spawn
+  run; before the upload moved out of the tick it was 11 until the growth re-uploaded itself).
+  Note that `Multimesh.VisibleInstanceCount` still reads the old value after the resize, so a test
+  has to look at `RenderingServer.MultimeshGetBuffer`, from `RenderingServer.FramePreDraw`, to see
+  a blank frame.
 
 ### Do not mark the body buffer `coherent`
 
@@ -1047,12 +1093,24 @@ MSL 3.2+ and `volatile device` below that, so neighbour loads skip the cache and
 `memoryBarrier`) is only for an invocation that must *observe* another's plain write within
 the same dispatch; nothing here does that.
 
-### `Multimesh.VisibleInstanceCount` vs `Multimesh.InstanceCount`
+### `Multimesh.VisibleInstanceCount` vs `Multimesh.InstanceCount` vs `AliveHogCount`
 
 `InstanceCount` is the total allocated slot count (grows with `SpawnHogs`).
-`VisibleInstanceCount` is set each frame to `aliveCount` (dead bodies are
-compacted out). Rendering respects `VisibleInstanceCount`. Do not confuse the two
-when calculating buffer sizes or work group counts.
+`VisibleInstanceCount` is set each frame to the number of hogs `DrawHogs` uploaded: the live ones
+in the camera's view, often half the crowd or less. Rendering respects `VisibleInstanceCount`. For
+how many hogs are alive, read `AliveHogCount` (the HUD's `TotalHogs.gd` does); it used to be
+`VisibleInstanceCount`, before culling. Do not confuse any of them with `NumBodies` when
+calculating buffer sizes or work group counts.
+
+### Hogs are culled to the viewport's current camera
+
+`DrawHogs` culls against `GetViewport().GetCamera3D()`. Anything else that renders the crowd, such
+as a second camera, a SubViewport or a split screen, sees only what the main camera sees; turn
+`FrustumCulling` off for that. Hogs within `FrustumCullMargin` (2 m) plus the mesh's bounding
+radius of the view are kept, so a hog just off-screen still casts its shadow into view. The sun is
+78° up, so hog shadows from it reach ~0.1 m. The shadowed omni and spot lights sit low, though,
+and a hog further off-screen than the margin, between such a light near the screen edge and a
+surface in view, loses its shadow there. Raise the margin if that shows.
 
 ### Never write `bodies[id] = self` in physics_compute
 
@@ -1099,6 +1157,8 @@ Before marking any task complete:
       rebuilds its uniform set
 - [ ] If new code reads a GPU buffer or the transform readback → it runs after
       `CompleteGpuTick`'s `Sync`, and counts bodies from the readback, not `NumBodies` (§14)
+- [ ] If new code needs the number of live hogs → `AliveHogCount`, not
+      `Multimesh.VisibleInstanceCount`, which counts only the hogs in view (§14)
 - [ ] If a new per-frame code path was added in C# → no heap allocations
       (verify with Rider's Heap Allocations Viewer or manual audit)
 - [ ] If a new trigger effect key was added → `FindCollisionShapes`,
