@@ -188,6 +188,7 @@ public sealed partial class SquadMultiMeshInstance3D : MultiMeshInstance3D
     public bool HasTeleport;
     public Vector2 TeleportXZ; // world XZ destination
     public float TeleportY; // world Y spawn height (0 = near ground)
+    public float GravityScale; // × Gravity for this projectile: 0 = dead straight, 1 = full drop
     public uint ContagionType; // CONTAGION_FIRE | CONTAGION_POISON | CONTAGION_ALCOHOL
     public float ContagionDuration; // seconds
     public int SourceBodyIndex; // -1 = not a hog; else index of throwing hog
@@ -427,6 +428,7 @@ public sealed partial class SquadMultiMeshInstance3D : MultiMeshInstance3D
   public const int PROJ_FLAGS = 18; // uint (reinterpreted)
   public const int PROJ_SOURCE = 19; // float body index, -1 = none
   public const int PROJ_TELEPORT_Y = 20; // float spawn height for teleport (world Y)
+  public const int PROJ_GRAVITY_SCALE = 21; // float × Gravity for this projectile
 
   // Projectile flag bits (must match projectile_compute.glsl)
   public const uint PROJ_FLAG_ALIVE = 1u;
@@ -446,6 +448,7 @@ public sealed partial class SquadMultiMeshInstance3D : MultiMeshInstance3D
   public const int PROJ_PUSH_Y_OFFSET = 4;
   public const int PROJ_PUSH_FRAME_STAMP = 5;
   public const int PROJ_PUSH_TIME = 6;
+  public const int PROJ_PUSH_BODY_RADIUS = 7;
   public const int PROJ_PUSH_SIZE = 8 * sizeof(float); // 8 slots
 
   // Physics push-constant slots  (PHYSICS_PUSH_SIZE = 18 × sizeof(float))

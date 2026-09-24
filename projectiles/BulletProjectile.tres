@@ -6,4 +6,7 @@
 script = ExtResource("1_02deo")
 radius = 0.9
 damage = 50.0
+spread_deg = 1.0
+speed_variance = 0.03
+fire_interval = 0.04
 metadata/_custom_type_script = "uid://ccsl3vs1sry8u"

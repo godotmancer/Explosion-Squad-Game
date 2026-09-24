@@ -10,4 +10,7 @@ force = 0.0
 damage_per_second = 0.5
 contagion_type = 256
 contagion_duration = 15.0
+spread_deg = 1.5
+speed_variance = 0.03
+fire_interval = 0.06
 metadata/_custom_type_script = "uid://ccsl3vs1sry8u"
