@@ -147,10 +147,22 @@ public sealed partial class SquadMultiMeshInstance3D : MultiMeshInstance3D
     // multiply → integer multiplier; (Value-1) clones spawned per entering hog (permanent immunity per zone)
     // add      → integer count; that many hogs spawned at the zone centre per entry (permanent immunity per zone)
     public float Value;
-
-    // Hog indices that were inside this zone last frame (enter/exit detection).
-    public HashSet<int> Occupants = [];
   }
+
+  // One zone's footprint for one ProcessTriggerZones pass, resolved once per pass rather than
+  // once per hog. The Min/Max box is a cheap reject tested before the exact shape.
+  private struct TriggerBounds
+  {
+    public Vector2 Center;
+    public Vector2 HalfExt; // radius in X for a circle
+    public Vector2 Axis;
+    public bool IsCircle;
+    public float MinX, MaxX, MinZ, MaxZ;
+  }
+
+  // Occupancy is one bit per zone in a ulong per hog (_zoneMasks), so this is the most zones
+  // tested; any beyond it are ignored, with a warning.
+  private const int MAX_TRIGGER_ZONES = 64;
 
   [Signal]
   public delegate void HogStateChangedEventHandler(int index, int newState, Vector3 worldPos);
@@ -513,8 +525,19 @@ public sealed partial class SquadMultiMeshInstance3D : MultiMeshInstance3D
   // Dead hog entries linger harmlessly (indices are never recycled).
   private readonly HashSet<long> _triggeredPairs = [];
 
-  // Scratch set reused for per-zone occupant tracking (zero per-frame allocation).
-  private HashSet<int> _zoneOccupantsScratch = [];
+  // Per body, bit z is set if the hog was inside trigger zone z on the last pass: an enter is
+  // `inside & ~_zoneMasks[i]`. Replaces a HashSet of occupants per zone, which cost a hash
+  // lookup per hog per zone and a full pass over the readback per zone — ~10 ms a tick at
+  // 100k hogs with four zones. Sized to _bodyCapacity like _hogStates, grown in SpawnHogs.
+  private ulong[] _zoneMasks;
+
+  // The zone list _zoneMasks was built against. A rescan (InvalidateObstacleCache) makes a
+  // new list whose indices may mean other zones, so the masks are cleared when it changes —
+  // every hog inside a zone then enters it afresh, as it did when each zone kept its own set.
+  private List<TriggerZone> _zoneMasksZones;
+
+  // Per-pass zone footprints, indexed like the zone list.
+  private readonly TriggerBounds[] _triggerBounds = new TriggerBounds[MAX_TRIGGER_ZONES];
 
   // Trigger-zone damage summed per hog over one ProcessTriggerZones pass, then written once
   // per hog by FlushZoneDamage. damage_accum is a plain GPU word that a CPU write replaces,
@@ -899,6 +922,7 @@ public sealed partial class SquadMultiMeshInstance3D : MultiMeshInstance3D
       EnqueueGrowPhysics(newCapacity, (int)writeOffset);
       _bodyCapacity = newCapacity;
       Array.Resize(ref _hogStates, newCapacity);
+      Array.Resize(ref _zoneMasks, newCapacity);
     }
 
     EnqueueGpuWrite(GpuTarget.Physics, writeOffset, newBytes);

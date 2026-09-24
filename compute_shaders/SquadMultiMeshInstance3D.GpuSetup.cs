@@ -49,6 +49,7 @@ public sealed partial class SquadMultiMeshInstance3D
     var bodiesData = new GpuBody[_bodyCapacity];
 
     _hogStates = new byte[_bodyCapacity];
+    _zoneMasks = new ulong[_bodyCapacity];
 
     for (var i = 0; i < NumBodies; i++)
     {

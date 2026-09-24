@@ -24,8 +24,8 @@
 
 Every hog is simulated on the GPU: flocking, obstacle avoidance, panic, contagion, damage, all of it
 in compute shaders. The CPU never positions a hog; it only reads them back to draw them in a single
-MultiMesh draw call. `Main.tscn` ships with **10,000 hogs**; **50,000** still run in real time, and
-the simulation keeps going at 100,000, just no longer in real time.
+MultiMesh draw call. `Main.tscn` ships with **10,000 hogs**; **75,000** still run in real time, and
+100,000 run at about 20 fps.
 
 > Built mainly to see how far you can push Godot's compute shader support before the GPU gives up.
 > It hasn't yet.
@@ -33,10 +33,10 @@ the simulation keeps going at 100,000, just no longer in real time.
 ## 🐷 How many hogs?
 
 <div align="center">
-<img src="screenshots/50000_hogs.png" width="480" alt="Zoomed-out view of 50,000 hogs covering the whole map, with the HUD reading 89 fps">
+<img src="screenshots/75000_hogs.png" width="480" alt="Zoomed-out view of 75,000 hogs covering the whole map, with the HUD reading 82 fps">
 
-<sub>50,000 hogs scattered across the map, seen from far out: 89 fps with every hog drawn and
-shadowed. The HUD counts the 46,366 still standing ten seconds in.</sub>
+<sub>75,000 hogs scattered across the map, seen from far out: 82 fps with every hog drawn and
+shadowed. The HUD counts the 67,226 still standing fifteen seconds in.</sub>
 </div>
 
 Measured on an Apple M4 Pro (Metal, Forward+), with `Main.tscn` as shipped and the hogs scattered
@@ -44,15 +44,20 @@ across the map:
 
 | Hogs | Frame time, as shipped | Simulation only (hogs hidden) | Real time? |
 |---:|---|---|:---:|
-| 20,000 | 8.4 ms (120 fps, the display cap) | 8.3 ms (display cap) | ✅ |
-| 50,000 | 11.5 ms (87 fps) | 8.5 ms (118 fps) | ✅ |
-| 75,000 | 60.7 ms (16 fps) | 11.8 ms (85 fps) | ⚠️ drawing tips it over |
-| 100,000 | 180 ms (6 fps) | 143 ms (7 fps) | ❌ |
+| 20,000 | 8.6 ms (116 fps, near the 120 fps display cap) | 8.8 ms | ✅ |
+| 50,000 | 9.4 ms (107 fps) | 8.7 ms | ✅ |
+| 75,000 | 14.6 ms (68 fps) | 8.7 ms | ✅ |
+| 100,000 | 48.9 ms (20 fps) | 11.9 ms (84 fps) | ⚠️ simulation keeps up, at 20 fps |
 
-Past about 50,000 the cost falls off a cliff instead of growing smoothly. Physics runs at a fixed
-60 Hz, so once a frame takes longer than a tick, Godot runs extra ticks to catch up, and here each
-tick is a full GPU dispatch and sync. At 100,000 hogs one tick costs ~17.6 ms, just over the
-16.7 ms budget, so every frame runs the maximum of 8 ticks.
+Physics runs at a fixed 60 Hz. Once a tick plus drawing the frame no longer fits in 16.7 ms,
+Godot runs extra ticks each frame to catch up, and here every tick is a full GPU dispatch and
+sync, so frame rate drops in steps rather than smoothly. At 100,000 hogs it settles at about three
+ticks a frame, still keeping the simulation at 97% of real time.
+
+Until recently the ceiling was 50,000: the CPU-side trigger-zone check tested every hog against
+each zone in a separate pass with a hash lookup per hog, ~10 ms a tick at 100,000 hogs. It is now
+one pass with a bitmask per hog, which took 75,000 hogs from 16 to 68 fps and 100,000 from 6 to
+20.
 
 ## ✨ What's new
 
@@ -65,6 +70,7 @@ tick is a full GPU dispatch and sync. At 100,000 hogs one tick costs ~17.6 ms, j
 | 🦠 **Contagion that ends** | Fire, poison and drunk each run on their own clock, pass on a shorter dose at every hop, and wear off, taking the colour tint with them. |
 | 🪂 **Airborne hits** | Hogs knocked into the air can now be hit too. |
 | 🧱 **Solid walls** | Hog contacts use the drawn mesh's footprint, so hogs no longer sink into walls, and hollow shapes like the play pen are split into their real walls. |
+| 🐖 **Bigger crowds** | Trigger zones are checked in one pass with a bitmask per hog: 75,000 hogs now run in real time (68 fps), and 100,000 at 20 fps instead of 6. |
 | 🗺️ **Sharper neighbour grid** | The spatial hash is now a wrap-around grid with a 16-bit frame stamp: no collisions between distant cells, and no stale neighbours left behind. |
 
 ## 📦 What's in the box

@@ -211,7 +211,7 @@ mechanism — it preserves the public API and requires no scene-file changes.
 | `Obstacles.cs` | Obstacle cache, `ExtractObstacles`, `EmitObstacleDataArray/List`, `WriteObstacle`, `ComputeMinObb`, `DecomposeTrimeshFootprint`, `ObstacleSlotCount`, `FindCollisionShapes`, `UpdateObstacleBuffer` |
 | `Projectiles.cs` | `SpawnProjectile`, `UploadPendingProjectiles`, `UpdateProjectileLifetimes`, `RegisterProjectileHitCallback`, `WriteProjectilePush` |
 | `Bombs.cs` | `DrainDeathFxQueue`, `OnDeathFxFinished`, `OnHogDied`, `DropBomb`, `UpdateBombBuffer` |
-| `TriggerZones.cs` | `ProcessTriggerZones`, `QueueZoneDamage`, `FlushZoneDamage`, `DamageHogViaBuffer`, `ScanForTriggers`, `GetTriggerBounds`, `IsInsideCircle/OBB`, `TriggerKey` |
+| `TriggerZones.cs` | `ProcessTriggerZones`, `OnZoneEntered`, `QueueZoneDamage`, `FlushZoneDamage`, `DamageHogViaBuffer`, `ScanForTriggers`, `GetTriggerBounds`, `IsInsideCircle/OBB`, `TriggerKey` |
 | `Labels.cs` | `_timeSinceLastLabelUpdate` field, `UpdateLabels`, `ClassifyState`, `IsLabelOnScreen` |
 
 **Rule:** all field *declarations* stay in the main `.cs` file, with two deliberate
@@ -793,6 +793,24 @@ Specifics worth not re-deriving:
 - ~0.5% of hogs end up inside an obstacle at `PBD_ITERATIONS = 1` in a dense crowd. Pre-existing
   solver behaviour, verified identical with and without the broad-phase.
 
+**Crowd size.** With the box mesh `Main.tscn` now ships, hogs scattered over the map, M4 Pro, Debug
+build: 20k 116 fps, 50k 107 fps, 75k 68 fps (all real time), 100k 20 fps. At 100k one tick costs
+roughly: GPU dispatch + `Sync` 4–10 ms (grows with crowd density), `BufferGetData` ~1.1 ms,
+compaction ~1 ms, trigger zones ~3 ms (plus 1–3 ms of `HogZoneTriggered` handlers while hogs are
+shown), `MultimeshSetBuffer` ~1.1 ms.
+
+- **The cliff is the physics catch-up, not linear cost.** Physics is fixed at 60 Hz; once a tick
+  plus the frame's drawing exceeds 16.7 ms, Godot runs extra ticks per frame (up to
+  `max_physics_steps_per_frame`, 8), and every tick here is a full dispatch + `Sync`. Before the
+  trigger-zone rewrite (§14) a 100k tick was ~17.6 ms on its own, so every frame ran 8 ticks (6 fps).
+  Capping the steps at 2 gives smoother frames but slows the simulation below real time.
+- **The CPU runs unoptimised in the editor.** Godot runs the Debug configuration, which disables
+  JIT optimisation; the per-hog C# loops (compaction, trigger zones) run ~2× slower than optimised.
+  To measure optimised code, `dotnet build -p:Optimize=true --no-incremental` — without
+  `--no-incremental` MSBuild skips the recompile and the flag silently does nothing.
+- **`BufferGetData` allocates the whole readback every tick** (8 MB at 100k), a large-object
+  allocation that triggers a gen-2 GC roughly every third tick. Not yet avoided.
+
 ---
 
 ## 13. Making Changes — by Task Type
@@ -912,12 +930,24 @@ Growth itself now runs inside the command queue (`ApplyPhysicsGrowth` in `GpuQue
 preserves existing contents with a GPU-side `_rd.BufferCopy`, not a readback-and-merge on the
 CPU. `SpawnHogs` enqueues `EnqueueGrowPhysics`; it does not resize anything directly.
 
-### `currOccupants` in ProcessTriggerZones allocates
+### Trigger zones are one pass with a bitmask per hog — keep them that way
 
-`ProcessTriggerZones` creates a `new HashSet<int>()` per zone per frame. This is a
-known allocation site that was judged acceptable (trigger zones are few). If the
-number of trigger zones grows large, convert to a pre-allocated swap pattern like
-the label sets.
+`ProcessTriggerZones` walks the readback once, testing each hog against every zone (a world-aligned
+box reject from `GetTriggerBounds`, then the exact circle / OBB). Occupancy is a `ulong` per hog in
+`_zoneMasks`, bit *z* for zone *z*, so an enter is `inside & ~previous`. It used to keep a
+`HashSet<int>` of occupants per zone and walk every hog once per zone: at 100k hogs and four zones
+that was ~10 ms of every tick, half the tick, and the reason 75k hogs fell into the physics
+catch-up spiral (§12.1). Do not reintroduce a per-zone pass or a per-hog hash lookup.
+
+Behaviour the masks preserve:
+
+- A zone that is disabled or hidden this pass is left out of `activeMask`; its bits carry over, so
+  it neither fires nor forgets who was inside.
+- When `_triggerZones` is rebuilt (a new list), `_zoneMasks` is cleared: every hog inside a zone
+  enters it again, as it did when rebuilt zones started with empty occupant sets.
+- At most `MAX_TRIGGER_ZONES = 64` zones are tested (one bit each); extras are ignored with a warning.
+- `_zoneMasks` is sized to `_bodyCapacity` and grown with `_hogStates` in `SpawnHogs`. The scan holds
+  a span over it, re-taken if a `HogZoneTriggered` handler spawned hogs and grew it mid-pass.
 
 ### Trigger zone shapes must not connect VisibilityChanged
 
