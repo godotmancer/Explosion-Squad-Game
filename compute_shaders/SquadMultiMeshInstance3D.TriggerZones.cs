@@ -66,9 +66,9 @@ public sealed partial class SquadMultiMeshInstance3D
       activeMask |= 1UL << zoneIdx;
     }
 
-    // Snapshot NumBodies: SpawnHogs below grows it, but we only test the
-    // bodies that existed at the start of this frame.
-    var bodyCount = NumBodies;
+    // The bodies in this readback — not NumBodies, which counts hogs spawned since the GPU tick
+    // it came from (they have no row in it yet), and which SpawnHogs below grows further.
+    var bodyCount = gpuFloats.Length / INSTANCE_STRIDE;
     _pendingTriggerSpawns.Clear();
 
     if (activeMask != 0)
