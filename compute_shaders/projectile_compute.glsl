@@ -17,8 +17,8 @@
 //   Actual damage = proj.damage (treated as health fraction 0-1) × source health.
 //
 // Bindings (set 0):
-//   0 — BodiesBuffer      (coherent read/write — atomics for damage/impulse/etc.)
-//   1 — ProjectilesBuffer (coherent read/write — position integration, alive flag)
+//   0 — BodiesBuffer      (read/write — atomics for damage/impulse/etc.)
+//   1 — ProjectilesBuffer (read/write — each invocation owns one slot)
 //   2 — HashCountsBuffer  (readonly)
 //   3 — HashEntriesBuffer (readonly)
 // =============================================================================
@@ -44,7 +44,7 @@ struct Body {
     float radius;
     float mass;
     float facing_angle;
-    float wander_angle;
+    float pad7;               //  7  spare (was wander_angle)
     float health;
     float last_hit_time;
     float bomb_origin_x;
@@ -98,8 +98,11 @@ struct Projectile {
 // ---------------------------------------------------------------------------
 // Buffer bindings
 // ---------------------------------------------------------------------------
-layout(set = 0, binding = 0, std430) coherent buffer         BodiesBuffer      { Body       bodies[];      };
-layout(set = 0, binding = 1, std430) coherent buffer         ProjectilesBuffer  { Projectile projectiles[]; };
+// Neither body nor projectile buffer is `coherent` — same reasoning as physics_compute.glsl:
+// cross-invocation writes to bodies are atomics (device-scope regardless), and each
+// projectile slot is only ever touched by its own invocation.
+layout(set = 0, binding = 0, std430) restrict buffer          BodiesBuffer      { Body       bodies[];      };
+layout(set = 0, binding = 1, std430) restrict buffer          ProjectilesBuffer  { Projectile projectiles[]; };
 layout(set = 0, binding = 2, std430) restrict readonly buffer HashCountsBuffer  { uint       hash_counts[]; };
 layout(set = 0, binding = 3, std430) restrict readonly buffer HashEntriesBuffer { uint       hash_entries[];};
 
@@ -109,7 +112,7 @@ layout(push_constant, std430) uniform Params {
     int   num_bodies;
     float gravity;
     float y_offset;
-    uint  frame_parity;
+    uint  frame_stamp;   // frame index mod 65536, as given to spatial_hash_build.glsl
     float time;
     float pad;
 };
@@ -125,7 +128,6 @@ const uint PROJ_FLAG_IS_HOG = 4u;
 // Body flag bits (must match physics_compute.glsl)
 // ---------------------------------------------------------------------------
 const uint BODY_FLAG_TELEPORT  = 1u;
-const uint BODY_FLAG_HIT_FRAME = 2u;
 
 // Contagion state bits (must match physics_compute.glsl)
 const uint STATE_ON_FIRE   = 256u;  // bit 8
@@ -143,17 +145,20 @@ const float IMPULSE_SCALE   = 1000.0;
 // ---------------------------------------------------------------------------
 // Spatial hash constants (must match spatial_hash_build.glsl)
 // ---------------------------------------------------------------------------
-const uint  HASH_TABLE_SIZE   = 32768u; // MUST be a power of two — spatial_hash masks with (size - 1)
-                                        // Sized for ~2x occupied cells at 20k bodies; see the
-                                        // sizing note in spatial_hash_build.glsl. Oversizing is
-                                        // free at runtime, so this does not scale with body count.
+const uint  HASH_TABLE_SIZE   = 32768u; // == HASH_GRID_W * HASH_GRID_H; see the sizing note in
+                                        // spatial_hash_build.glsl. Oversizing is free at
+                                        // runtime, so this does not scale with body count.
+const uint  HASH_GRID_W       = 256u;   // cells along x before the grid wraps (power of two)
+const uint  HASH_GRID_H       = HASH_TABLE_SIZE / HASH_GRID_W; // along z: 128 (power of two)
 const uint  HASH_MAX_PER_CELL = 64u;
 const float HASH_CELL_SIZE    = 2.0;
+// Bucket word layout: frame stamp in the high 16 bits, entry count in the low 16.
+const uint  HASH_STAMP_SHIFT  = 16u;
+const uint  HASH_COUNT_MASK   = 0xFFFFu;
 
+// Wrap-around grid, identical in all three shaders — see spatial_hash_build.glsl.
 uint spatial_hash(int cx, int cz) {
-    uint hx = uint(cx) * 2654435761u;
-    uint hz = uint(cz) * 2246822519u;
-    return (hx ^ hz) & (HASH_TABLE_SIZE - 1u);
+    return (uint(cx) & (HASH_GRID_W - 1u)) + (uint(cz) & (HASH_GRID_H - 1u)) * HASH_GRID_W;
 }
 
 // ---------------------------------------------------------------------------
@@ -188,13 +193,14 @@ void main() {
 
     bool hit = false;
 
-    for (int dcx = -1; dcx <= 1 && !hit; dcx++) {
-        for (int dcz = -1; dcz <= 1 && !hit; dcz++) {
+    // x innermost, matching the grid layout (adjacent buckets along x).
+    for (int dcz = -1; dcz <= 1 && !hit; dcz++) {
+        for (int dcx = -1; dcx <= 1 && !hit; dcx++) {
 
             uint bucket = spatial_hash(cx + dcx, cz + dcz);
             uint stored  = hash_counts[bucket];
-            if ((stored >> 31u) != frame_parity) continue;
-            uint count = min(stored & 0x7FFFFFFFu, HASH_MAX_PER_CELL);
+            if ((stored >> HASH_STAMP_SHIFT) != frame_stamp) continue; // not written this frame
+            uint count = min(stored & HASH_COUNT_MASK, HASH_MAX_PER_CELL);
 
             for (uint k = 0u; k < count && !hit; k++) {
                 int bi = int(hash_entries[bucket * HASH_MAX_PER_CELL + k]);
@@ -266,16 +272,17 @@ void main() {
 
                 // --- Teleport ---
                 if ((proj.flags & PROJ_FLAG_HAS_TELE) != 0u) {
-                    // Use HIT_FRAME as a first-setter guard: only the first projectile to hit
-                    // writes the teleport destination.
-                    uint prev_flags = atomicOr(bodies[bi].body_flags, BODY_FLAG_TELEPORT | BODY_FLAG_HIT_FRAME);
-                    if ((prev_flags & BODY_FLAG_HIT_FRAME) == 0u) {
+                    // First-setter guard on the TELEPORT bit itself: only the first teleporting
+                    // projectile to hit writes the destination. It must not key off a generic
+                    // "hit this frame" bit — an ordinary hit landing first would then make the
+                    // teleport skip its write, and physics would move the hog to whatever
+                    // destination was left over (the world origin, for a hog never teleported).
+                    uint prev_flags = atomicOr(bodies[bi].body_flags, BODY_FLAG_TELEPORT);
+                    if ((prev_flags & BODY_FLAG_TELEPORT) == 0u) {
                         bodies[bi].teleport_x = proj.teleport_x;
                         bodies[bi].teleport_z = proj.teleport_z;
                         bodies[bi].teleport_y = proj.teleport_y;
                     }
-                } else {
-                    atomicOr(bodies[bi].body_flags, BODY_FLAG_HIT_FRAME);
                 }
 
                 // Kill projectile — write back below

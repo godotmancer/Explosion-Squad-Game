@@ -40,11 +40,13 @@ public sealed partial class SquadMultiMeshInstance3D
     Obstacles,
     Bombs,
     Projectiles,
+    HashCounts,
   }
 
   private enum GpuCommandKind : byte
   {
     Write,
+    Clear,
     GrowPhysics,
     GrowObstacles,
   }
@@ -54,10 +56,15 @@ public sealed partial class SquadMultiMeshInstance3D
     public GpuCommandKind Kind;
     public GpuTarget Target;
 
-    // Write: byte offset within the target buffer, and the payload's slice of _gpuPayload.
+    // Write / Clear: byte offset within the target buffer.
     public uint Offset;
+
+    // Write: the payload's slice of _gpuPayload.
     public int PayloadOffset;
     public int PayloadSize;
+
+    // Clear: how many bytes to zero.
+    public uint ClearBytes;
 
     // GrowPhysics: new capacity in bodies. GrowObstacles: new size in bytes.
     public int NewCapacity;
@@ -86,6 +93,7 @@ public sealed partial class SquadMultiMeshInstance3D
       GpuTarget.Obstacles => _obstacleBuffer,
       GpuTarget.Bombs => _bombBuffer,
       GpuTarget.Projectiles => _projBuffer,
+      GpuTarget.HashCounts => _hashCountsBuffer,
       _ => default,
     };
 
@@ -118,6 +126,18 @@ public sealed partial class SquadMultiMeshInstance3D
 
     _gpuPayloadUsed = needed;
   }
+
+  /// <summary>Queues zeroing a byte range of one of the GPU buffers.</summary>
+  private void EnqueueGpuClear(GpuTarget target, uint offset, uint sizeBytes) =>
+    _gpuCommands.Add(
+      new GpuCommand
+      {
+        Kind = GpuCommandKind.Clear,
+        Target = target,
+        Offset = offset,
+        ClearBytes = sizeBytes,
+      }
+    );
 
   /// <summary>
   /// Queues a body-buffer capacity increase. <paramref name="preservedBytes"/> is how much
@@ -172,6 +192,10 @@ public sealed partial class SquadMultiMeshInstance3D
             (uint)cmd.PayloadSize,
             _gpuScratch
           );
+          break;
+
+        case GpuCommandKind.Clear:
+          _ = _rd.BufferClear(ResolveGpuTarget(cmd.Target), cmd.Offset, cmd.ClearBytes);
           break;
 
         case GpuCommandKind.GrowPhysics:

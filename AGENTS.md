@@ -183,10 +183,17 @@ global one (which may only be touched on the rendering thread). Do not reintrodu
 `_rd.BufferUpdate` call outside `GpuQueue.cs` — it would break that migration path and the
 FIFO ordering guarantee.
 
-**Frame parity:** `_hashFrameParity` toggles 0 ↔ 1 each physics frame. The hash
-build shader uses it to lazily invalidate stale buckets without a separate clear
-pass. Both the hash build and physics push constants must receive the *same* parity
-value within a single frame. It is flipped *after* `Sync()`.
+**Frame stamp:** `_hashFrameStamp` is the physics frame index masked to 16 bits
+(`HASH_STAMP_MASK`). The hash build stores it in the high half of each bucket word and
+lazily resets any bucket carrying a different stamp, so no clear pass is needed; the queries
+treat a mismatched stamp as empty. All three push constants (hash build, projectile,
+physics) must receive the *same* stamp within a single frame. It advances *after* `Sync()`,
+and when it wraps to 0 C# queues `EnqueueGpuClear` over the bucket words, so a bucket left
+untouched for exactly 65 536 frames cannot read as current.
+
+It used to be a 1-bit parity, which cannot tell "written this frame" from "written two frames
+ago": every cell a hog walked out of came back as valid on alternate frames, feeding stale
+entries into neighbour queries. Do not narrow it again.
 
 ---
 
@@ -200,7 +207,7 @@ mechanism — it preserves the public API and requires no scene-file changes.
 |------|-----------------|
 | `SquadMultiMeshInstance3D.cs` | All `[Export]` properties, all inner types (`GpuBody`, `BombState`, `ProjectileAbility`, enums), all `[Signal]` declarations, all private field declarations, all buffer-layout constants, lifecycle (`_Ready` / `_Process` / `_PhysicsProcess` / `_UnhandledInput`), `SpawnHogs`, `UpdateTargetFromMouse` |
 | `GpuSetup.cs` | `SetupCompute`, `SetupMultiMesh`, `Dispose`, `WriteXxxPush`, `RebuildXxxUniformSet`, `VerifyPipeline`, `SampleHashOverflow` |
-| `GpuQueue.cs` | `GpuTarget` / `GpuCommandKind` enums, `GpuCommand` struct, `_gpuCommands` / `_gpuPayload` / `_gpuScratch`, `EnqueueGpuWrite`, `EnqueueGrowPhysics`, `EnqueueGrowObstacles`, `FlushGpuCommands`, `ResolveGpuTarget`, `ApplyPhysicsGrowth`, `ApplyObstacleGrowth`, `FreeGpuRid`. **The only file allowed to call `RenderingDevice` mutators.** |
+| `GpuQueue.cs` | `GpuTarget` / `GpuCommandKind` enums, `GpuCommand` struct, `_gpuCommands` / `_gpuPayload` / `_gpuScratch`, `EnqueueGpuWrite`, `EnqueueGpuClear`, `EnqueueGrowPhysics`, `EnqueueGrowObstacles`, `FlushGpuCommands`, `ResolveGpuTarget`, `ApplyPhysicsGrowth`, `ApplyObstacleGrowth`, `FreeGpuRid`. **The only file allowed to call `RenderingDevice` mutators.** |
 | `Obstacles.cs` | Obstacle cache, `ExtractObstacles`, `EmitObstacleDataArray/List`, `WriteObstacle`, `ComputeMinObb`, `DecomposeTrimeshFootprint`, `ObstacleSlotCount`, `FindCollisionShapes`, `UpdateObstacleBuffer` |
 | `Projectiles.cs` | `SpawnProjectile`, `UploadPendingProjectiles`, `UpdateProjectileLifetimes`, `RegisterProjectileHitCallback`, `WriteProjectilePush` |
 | `Bombs.cs` | `DrainDeathFxQueue`, `OnDeathFxFinished`, `OnHogDied`, `DropBomb`, `UpdateBombBuffer` |
@@ -237,13 +244,18 @@ compute_shaders/projectile_compute.glsl
 compute_shaders/SquadMultiMeshInstance3D.cs   (struct GpuBody, BODY_STRIDE)
 ```
 
-**Fields owned by atomics.** `state` (14), `damage_accum` (16), `contagion_expiry_u` (17) and
-`dps_rate_u` (18) are written only through atomic ops, by more than one invocation.
-`physics_compute` therefore does **not** write `bodies[id] = self` — that would clobber a
-neighbour's concurrent atomic. It writes 17 explicit fields instead, deliberately omitting the
-four atomic-owned ones plus `radius`, `mass`, `teleport_x/z/y` and `pad3`, which are never
-modified on the GPU. If you add a body field, decide which category it is in and update that
-write block accordingly.
+**Fields owned by atomics.** During the physics dispatch, `state` (14), `contagion_expiry_u`
+(17) and `dps_rate_u` (18) are written through atomics by more than one invocation (neighbours
+spreading contagion). `physics_compute` therefore does **not** write `bodies[id] = self` — that
+would clobber a neighbour's concurrent atomic. It writes 16 explicit fields instead, omitting
+those three plus `radius`, `mass`, `teleport_x/z/y`, `pad7` and `pad3`, which physics never
+modifies. `damage_accum`, `impulse_*` and `body_flags` are accumulated atomically by
+`projectile_compute` in the *previous* dispatch, so physics consumes and zeroes them with plain
+stores. If you add a body field, decide which category it is in and update that write block
+accordingly.
+
+Slots 7 (`pad7`, formerly `wander_angle`, which is rebuilt every frame and is now a local) and
+27 (`pad3`) are spare. Reuse one before growing `BODY_STRIDE`.
 
 ### Contagion encoding
 
@@ -292,16 +304,30 @@ are float offsets, the GLSL constants are vec4 offsets.
 
 | Constant | Value | Note |
 |----------|-------|------|
-| `HASH_TABLE_SIZE` | 32768 | **Must be a power of two** — shaders mask with `size - 1` |
+| `HASH_TABLE_SIZE` | 32768 | `= HASH_GRID_W × HASH_GRID_H`, both powers of two |
+| `HASH_GRID_W` / `HASH_GRID_H` | 256 / 128 | GLSL-only. Cells along x / z before the grid wraps |
 | `HASH_MAX_PER_CELL` | 64 | Query loop runs `count` times, not this many |
 | `HASH_CELL_SIZE` | 2.0 | GLSL-only |
+| `HASH_STAMP_MASK` | `0xFFFF` | Bucket word is `(stamp << 16) \| count`; see "Frame stamp" in §5 |
 | `HASH_OVERFLOW_SLOT` | `HASH_TABLE_SIZE` | One extra uint past the table; cannot collide with a real bucket |
 | `HASH_COUNTS_BUFFER_SIZE` | `(HASH_TABLE_SIZE + 1) * 4` | The `+ 1` is the overflow slot |
 
-Oversizing the table is free at runtime, not just cheap: the frame-parity scheme means nothing
-ever iterates the table, so a bucket no body hashes to is never touched. The only cost is the
+Despite the name, `spatial_hash()` is a **wrap-around grid**, not a hash: cell `(cx, cz)` maps to
+bucket `(cx mod 256) + (cz mod 128) × 256`. Two cells share a bucket only when they are a whole
+grid apart — 512 m in x, 256 m in z — so a scan window never holds two cells of one bucket and
+each bucket's 64 entries really are per cell. The multiplicative hash it replaced,
+`(cx·A ^ cz·B) & mask`, collided structurally: modelled on a 20k-hog crowd it added 20–50%
+extra neighbour candidates, visited one bucket twice in 0.2% of 5×5 windows (double-counting
+those neighbours), and let dense cells split one bucket's capacity. The function is duplicated
+in all three shaders; keep them identical.
+
+Oversizing the table is free at runtime, not just cheap: the frame-stamp scheme means nothing
+ever iterates the table, so a bucket no body lands in is never touched. The only cost is the
 fixed allocation (128 KB counts + 8 MB entries). This is why it is a constant rather than
 scaling with body count — a game starting with five hogs pays the VRAM and zero per-frame time.
+
+The count half of a bucket word keeps rising past `HASH_MAX_PER_CELL` for overflowed inserts,
+so it only spills into the stamp at 65 536 inserts into one 2 m cell in a single frame.
 
 Per-cell overflow is a graceful no-op (the body is invisible as a neighbour for one frame) but
 is **counted**, not silent: `atomicAdd(hash_counts[HASH_OVERFLOW_SLOT], 1u)`. Set the
@@ -544,7 +570,7 @@ These are non-negotiable. Do not introduce patterns that violate them.
    throttled projectile flag readback, and the 1 Hz hash-overflow sample (which only runs
    when `DebugHashOverflow` is set).** Each `BufferGetData` forces a GPU sync stall.
 
-4a. **All GPU buffer mutations go through `EnqueueGpuWrite` / `EnqueueGrowXxx`.** Do not call
+4a. **All GPU buffer mutations go through `EnqueueGpuWrite` / `EnqueueGpuClear` / `EnqueueGrowXxx`.** Do not call
    `_rd.BufferUpdate`, `_rd.BufferCopy` or `_rd.BufferClear` outside `GpuQueue.cs`. See §5.
 
 4b. **Read back only the live prefix.** The transform readback is
@@ -767,11 +793,23 @@ exhausted and the cap is reached, excess death FX are silently dropped (the
 creation. Increase the cap or raise `MaxDeathFxPerFrame` if deaths feel visually
 sparse at high kill rates.
 
-### Frame parity must flip after Sync, not before
+### Frame stamp must advance after Sync, not before
 
-`_hashFrameParity ^= 1u` is called after `_rd.Sync()`. Moving it before `Submit`
-would cause the hash build and physics shaders in the same frame to disagree on
-which parity tag is "current", leading to physics seeing stale hash buckets.
+`_hashFrameStamp` is advanced after `_rd.Sync()`. Moving it before `Submit`
+would cause the hash build, projectile and physics shaders in the same frame to disagree on
+which stamp is "current", leading to physics seeing stale hash buckets.
+
+### Do not mark the body buffer `coherent`
+
+None of the three shaders declares a `coherent` buffer, deliberately. Atomics are device-scope
+with or without the qualifier (the SPIR-V atomics are identical either way), and every plain
+read of *another* body already tolerates seeing it from either side of that body's own update
+this frame — the tint comment in physics_compute's tail documents that one-frame lag. The
+qualifier only costs: Godot's Metal backend (SPIRV-Cross) turns it into `coherent device` at
+MSL 3.2+ and `volatile device` below that, so neighbour loads skip the cache and the
+`Body n = bodies[i]` snapshot cannot be trimmed to the fields actually used. `coherent` (plus a
+`memoryBarrier`) is only for an invocation that must *observe* another's plain write within
+the same dispatch; nothing here does that.
 
 ### `Multimesh.VisibleInstanceCount` vs `Multimesh.InstanceCount`
 
@@ -782,8 +820,8 @@ when calculating buffer sizes or work group counts.
 
 ### Never write `bodies[id] = self` in physics_compute
 
-Four fields are atomic-owned and written by other invocations concurrently (§7). A wholesale
-struct store clobbers them. The shader writes 17 named fields instead. The same reasoning
+Three fields are atomic-owned and written by other invocations concurrently (§7). A wholesale
+struct store clobbers them. The shader writes 16 named fields instead. The same reasoning
 applies to the state word: it is committed as
 
 ```glsl

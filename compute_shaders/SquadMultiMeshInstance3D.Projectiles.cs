@@ -16,7 +16,7 @@ public sealed partial class SquadMultiMeshInstance3D
     ints[PROJ_PUSH_NUM_BODIES] = NumBodies;
     floats[PROJ_PUSH_GRAVITY] = Gravity;
     floats[PROJ_PUSH_Y_OFFSET] = YOffset;
-    uints[PROJ_PUSH_FRAME_PARITY] = _hashFrameParity;
+    uints[PROJ_PUSH_FRAME_STAMP] = _hashFrameStamp;
     floats[PROJ_PUSH_TIME] = time;
     floats[7] = 0f; // pad
   }
