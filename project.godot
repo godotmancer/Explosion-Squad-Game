@@ -37,7 +37,7 @@ window/size/initial_position_type=4
 window/size/always_on_top=true
 window/hdr/request_hdr_output=true
 window/dpi/allow_hidpi=false
-window/vsync/vsync_mode=0
+window/handheld/orientation=1
 
 [dotnet]
 
