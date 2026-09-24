@@ -246,7 +246,7 @@ shader_parameter/albedo = Color(0.15293717, 0.476691, 0.69186234, 1)
 shader_parameter/glow_energy = 1.0
 
 [sub_resource type="BoxMesh" id="BoxMesh_5uiug"]
-size = Vector3(0.75, 0.5, 0.75)
+size = Vector3(0.5, 0.5, 0.75)
 
 [sub_resource type="MultiMesh" id="MultiMesh_thnk1"]
 transform_format = 1
