@@ -25,7 +25,7 @@ public sealed partial class SquadMultiMeshInstance3D
     var ints = MemoryMarshal.Cast<byte, int>(_projPushBytes.AsSpan());
     var uints = MemoryMarshal.Cast<byte, uint>(_projPushBytes.AsSpan());
     floats[PROJ_PUSH_DELTA_TIME] = deltaTime;
-    ints[PROJ_PUSH_NUM_PROJ] = MAX_PROJECTILES;
+    ints[PROJ_PUSH_NUM_PROJ] = _projHighWater;
     ints[PROJ_PUSH_NUM_BODIES] = NumBodies;
     floats[PROJ_PUSH_GRAVITY] = Gravity;
     floats[PROJ_PUSH_Y_OFFSET] = YOffset;
@@ -43,7 +43,7 @@ public sealed partial class SquadMultiMeshInstance3D
 
     // Reclaim slots the GPU killed early (ground hit or body collision) so the pool
     // never exhausts under sustained fire. Also fires per-slot hit callbacks.
-    // Throttled to every 2 frames — BufferGetData stalls on the GPU readback.
+    // Throttled to every 2 frames.
     _projReadbackCounter = (_projReadbackCounter + 1) % 2;
     if (_projReadbackCounter == 0 && AnyProjectileActiveOnGpu())
     {
@@ -51,7 +51,7 @@ public sealed partial class SquadMultiMeshInstance3D
     }
 
     // C#-side lifetime countdown — reclaims slots whose grace period ran out.
-    for (var i = 0; i < MAX_PROJECTILES; i++)
+    for (var i = 0; i < _projHighWater; i++)
     {
       if (_projLifetimes[i] <= 0f)
       {
@@ -70,14 +70,21 @@ public sealed partial class SquadMultiMeshInstance3D
       // but this guarantees a reclaimed slot can never keep colliding.
       var off = (uint)((i * PROJ_STRIDE * sizeof(float)) + (PROJ_FLAGS * sizeof(float)));
       EnqueueGpuWrite(GpuTarget.Projectiles, off, _zeroFlagBytes);
-      _projFreeSlots.Enqueue(i);
+      _projFreeSlots.Push(i);
+    }
+
+    // Lower the high-water mark past the free slots at the top. Every free slot is dead on the
+    // GPU — killed there, or by the flag write above, which lands before the next dispatch.
+    while (_projHighWater > 0 && _projLifetimes[_projHighWater - 1] <= 0f)
+    {
+      _projHighWater--;
     }
   }
 
   /// <summary>True if any slot is tracked by C# and already uploaded to the GPU.</summary>
   private bool AnyProjectileActiveOnGpu()
   {
-    for (var i = 0; i < MAX_PROJECTILES; i++)
+    for (var i = 0; i < _projHighWater; i++)
     {
       if (_projLifetimes[i] > 0f && !_projPendingUpload[i])
       {
@@ -96,14 +103,16 @@ public sealed partial class SquadMultiMeshInstance3D
   /// </summary>
   private void ReclaimGpuKilledProjectiles()
   {
-    var raw = _rd.BufferGetData(_projBuffer);
-    if (raw == null || raw.Length != MAX_PROJECTILES * PROJ_STRIDE * sizeof(float))
+    // Only the slots below the high-water mark: everything above it is free.
+    var bytes = (uint)(_projHighWater * PROJ_STRIDE * sizeof(float));
+    var raw = _rd.BufferGetData(_projBuffer, 0, bytes);
+    if (raw == null || raw.Length != bytes)
     {
       return;
     }
 
     var floats = MemoryMarshal.Cast<byte, float>(raw.AsSpan());
-    for (var i = 0; i < MAX_PROJECTILES; i++)
+    for (var i = 0; i < _projHighWater; i++)
     {
       // Skip untracked or not-yet-uploaded slots. Slots already inside the grace
       // window are left for the lifetime countdown to reclaim naturally.
@@ -134,7 +143,7 @@ public sealed partial class SquadMultiMeshInstance3D
       // loop skips slots already at <= 0. The GPU cleared the alive flag itself,
       // so no buffer write is needed here.
       _projLifetimes[i] = 0f;
-      _projFreeSlots.Enqueue(i);
+      _projFreeSlots.Push(i);
     }
   }
 
@@ -155,15 +164,13 @@ public sealed partial class SquadMultiMeshInstance3D
   {
     while (_pendingProjSpawns.TryDequeue(out var slot))
     {
-      Buffer.BlockCopy(
-        _projAllStagingFloats,
-        slot * PROJ_STRIDE * sizeof(float),
-        _projSlotUploadBytes,
-        0,
-        _projSlotUploadBytes.Length
+      // Straight from the staging floats. Slots handed out in a row are consecutive, so the
+      // queue merges their writes into one upload.
+      EnqueueGpuWrite(
+        GpuTarget.Projectiles,
+        (uint)(slot * PROJ_STRIDE * sizeof(float)),
+        MemoryMarshal.AsBytes(_projAllStagingFloats.AsSpan(slot * PROJ_STRIDE, PROJ_STRIDE))
       );
-      var off = (uint)(slot * PROJ_STRIDE * sizeof(float));
-      EnqueueGpuWrite(GpuTarget.Projectiles, off, _projSlotUploadBytes);
       // Cleared here rather than at flush time: the drain runs later this same frame, and
       // ReclaimGpuKilledProjectiles only reads the buffer earlier in the frame, so by the
       // next read this upload has landed.
@@ -179,10 +186,12 @@ public sealed partial class SquadMultiMeshInstance3D
   /// </summary>
   public int SpawnProjectile(Vector3 position, Vector3 velocity, ProjectileAbility ability)
   {
-    if (!_projFreeSlots.TryDequeue(out var slot))
+    if (!_projFreeSlots.TryPop(out var slot))
     {
       return -1;
     }
+
+    _projHighWater = Math.Max(_projHighWater, slot + 1);
 
     // C# lifetime with extra grace period so the slot outlives the GPU particle
     _projLifetimes[slot] = ability.Lifetime + PROJ_LIFETIME_GRACE;

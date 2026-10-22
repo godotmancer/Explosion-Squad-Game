@@ -2,15 +2,16 @@ namespace ExplosionSquadGame.compute_shaders;
 
 using System;
 using System.Collections.Generic;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using Godot;
 
 public sealed partial class SquadMultiMeshInstance3D
 {
   /// <summary>
-  /// Called after the GPU sync and the death loop each physics frame.
-  /// Tests every alive hog against each trigger zone using transform-buffer
-  /// positions we already have in <paramref name="gpuFloats"/>, in one pass over the hogs.
+  /// Readies the trigger zones for this tick's <see cref="ReadbackPass"/>, which tests every
+  /// live hog against them through <see cref="TestTriggerZones"/>; <see cref="EndTriggerZonePass"/>
+  /// then applies and reports what it found. Returns the zones to test, one bit each.
   ///
   /// Effects fire only on the enter transition (first frame inside), found by comparing the
   /// hog's zones this pass with <see cref="_zoneMasks"/> from the last.
@@ -21,15 +22,16 @@ public sealed partial class SquadMultiMeshInstance3D
   /// the zone on the next frame, while a genuine exit + re-entry triggers again.
   /// Damage re-triggers on every re-entry (no marks needed).
   /// </summary>
-  private void ProcessTriggerZones(ReadOnlySpan<float> gpuFloats)
+  private ulong BeginTriggerZonePass()
   {
-    // Snapshot the list at entry. _triggerZones can be nulled mid-frame by
-    // InvalidateObstacleCache (e.g. if an obstacle visibility change fires during
-    // signal emission), so we capture a local reference and bail if it's gone.
+    _pendingTriggerSpawns.Clear();
+
+    // Snapshot the list at entry. _triggerZones can be nulled by InvalidateObstacleCache (an
+    // obstacle visibility change); the pass keeps working on the list it started with.
     var zones = _triggerZones;
-    if (zones == null)
+    if (zones is not { Count: > 0 })
     {
-      return;
+      return 0;
     }
 
     if (!ReferenceEquals(zones, _zoneMasksZones))
@@ -66,79 +68,60 @@ public sealed partial class SquadMultiMeshInstance3D
       activeMask |= 1UL << zoneIdx;
     }
 
-    // The bodies in this readback — not NumBodies, which counts hogs spawned since the GPU tick
-    // it came from (they have no row in it yet), and which SpawnHogs below grows further.
-    var bodyCount = gpuFloats.Length / INSTANCE_STRIDE;
-    _pendingTriggerSpawns.Clear();
+    return activeMask;
+  }
 
-    if (activeMask != 0)
+  /// <summary>
+  /// Tests live hog <paramref name="i"/>, at <paramref name="hogXZ"/>, against the
+  /// <paramref name="activeMask"/> zones, updates its occupancy <paramref name="mask"/>, and
+  /// applies an effect for every zone it has just entered.
+  /// </summary>
+  [MethodImpl(MethodImplOptions.AggressiveInlining)]
+  private void TestTriggerZones(int i, Vector2 hogXZ, ulong activeMask, ref ulong mask)
+  {
+    ReadOnlySpan<TriggerBounds> bounds = _triggerBounds;
+    var prev = mask;
+    var inside = prev & ~activeMask;
+    var pending = activeMask;
+    while (pending != 0)
     {
-      // Locals rather than fields: the call in the loop would otherwise make the JIT reload
-      // both arrays, and bounds-check them, on every hog.
-      var maskArray = _zoneMasks;
-      var masks = maskArray.AsSpan(0, bodyCount);
-      ReadOnlySpan<TriggerBounds> bounds = _triggerBounds.AsSpan(0, zoneCount);
-      for (var i = 0; i < masks.Length; i++)
+      var zoneIdx = System.Numerics.BitOperations.TrailingZeroCount(pending);
+      pending &= pending - 1;
+      ref readonly var b = ref bounds[zoneIdx];
+      if (hogXZ.X < b.MinX || hogXZ.X > b.MaxX || hogXZ.Y < b.MinZ || hogXZ.Y > b.MaxZ)
       {
-        var src = i * INSTANCE_STRIDE;
-        var stateBits = BitConverter.SingleToUInt32Bits(gpuFloats[src + INST_STATE]);
-        if ((stateBits & STATE_DEAD) != 0)
-        {
-          continue;
-        }
+        continue;
+      }
 
-        var hogXZ = new Vector2(gpuFloats[src + INST_ORIGIN_X], gpuFloats[src + INST_ORIGIN_Z]);
-        var prev = masks[i];
-        var inside = prev & ~activeMask;
-        var pending = activeMask;
-        while (pending != 0)
-        {
-          var zoneIdx = System.Numerics.BitOperations.TrailingZeroCount(pending);
-          pending &= pending - 1;
-          ref readonly var b = ref bounds[zoneIdx];
-          if (hogXZ.X < b.MinX || hogXZ.X > b.MaxX || hogXZ.Y < b.MinZ || hogXZ.Y > b.MaxZ)
-          {
-            continue;
-          }
-
-          if (
-            b.IsCircle
-              ? IsInsideCircle(hogXZ, b.Center, b.HalfExt.X)
-              : IsInsideOBB(hogXZ, b.Center, b.HalfExt, b.Axis)
-          )
-          {
-            inside |= 1UL << zoneIdx;
-          }
-        }
-
-        masks[i] = inside;
-        var entered = inside & ~prev;
-        if (entered == 0)
-        {
-          continue;
-        }
-
-        do
-        {
-          var zoneIdx = System.Numerics.BitOperations.TrailingZeroCount(entered);
-          entered &= entered - 1;
-          OnZoneEntered(i, zoneIdx, zones[zoneIdx], hogXZ);
-        } while (entered != 0);
-
-        // A HogZoneTriggered handler that spawned hogs could have grown _zoneMasks into a new
-        // array (the resize copies what was written so far); keep writing to the live one.
-        if (!ReferenceEquals(maskArray, _zoneMasks))
-        {
-          maskArray = _zoneMasks;
-          masks = maskArray.AsSpan(0, bodyCount);
-        }
+      if (
+        b.IsCircle
+          ? IsInsideCircle(hogXZ, b.Center, b.HalfExt.X)
+          : IsInsideOBB(hogXZ, b.Center, b.HalfExt, b.Axis)
+      )
+      {
+        inside |= 1UL << zoneIdx;
       }
     }
 
+    mask = inside;
+    var entered = inside & ~prev;
+    while (entered != 0)
+    {
+      var zoneIdx = System.Numerics.BitOperations.TrailingZeroCount(entered);
+      entered &= entered - 1;
+      OnZoneEntered(i, zoneIdx, _zoneMasksZones[zoneIdx], hogXZ);
+    }
+  }
+
+  /// <summary>
+  /// Applies what the pass found: writes the summed zone damage, spawns the Multiply/Add hogs
+  /// (marked immune to the zone that made them, so they cannot re-trigger it next frame), and
+  /// emits one <c>ZoneTriggered</c> per zone that hogs entered.
+  /// </summary>
+  private void EndTriggerZonePass()
+  {
     FlushZoneDamage();
 
-    // Spawn deferred hogs and immediately mark their indices as immune to
-    // the originating zone so they cannot re-trigger it next frame.
     foreach (var (zoneIdx, pos, count) in _pendingTriggerSpawns)
     {
       var firstNew = NumBodies;
@@ -149,6 +132,8 @@ public sealed partial class SquadMultiMeshInstance3D
           Vector3.Up,
           _rndGen.RandfRange(-Mathf.Pi / 4f, Mathf.Pi / 4f)
         );
+        // One hog per call, each with its own velocity. The body writes land back to back,
+        // so the GPU queue merges them into one upload.
         SpawnHogs(
           1,
           pos,
@@ -163,6 +148,32 @@ public sealed partial class SquadMultiMeshInstance3D
       {
         _triggeredPairs.Add(TriggerKey(ni, zoneIdx));
       }
+    }
+
+    var zones = _zoneMasksZones;
+    if (zones == null)
+    {
+      return;
+    }
+
+    var zoneCount = Math.Min(zones.Count, MAX_TRIGGER_ZONES);
+    for (var zoneIdx = 0; zoneIdx < zoneCount; zoneIdx++)
+    {
+      var count = _zoneTriggerCounts[zoneIdx];
+      if (count == 0)
+      {
+        continue;
+      }
+
+      _zoneTriggerCounts[zoneIdx] = 0;
+      var zone = zones[zoneIdx];
+      EmitSignal(
+        SignalName.ZoneTriggered,
+        zone.Shape,
+        (int)zone.Effect,
+        count,
+        _zoneTriggerPositions[zoneIdx]
+      );
     }
   }
 
@@ -219,11 +230,12 @@ public sealed partial class SquadMultiMeshInstance3D
         break;
     }
 
-    // Not gated on ShowHogs: handlers keep gameplay state (a gate counts its triggers down and
-    // closes), so they must run whether or not the crowd is drawn. They skip their own visuals.
+    // Counted, not emitted: EndTriggerZonePass reports each zone once per tick. Not gated on
+    // ShowHogs: handlers keep gameplay state (a gate counts its triggers down and closes).
     if (emitSignal)
     {
-      EmitSignal(SignalName.HogZoneTriggered, i, hogPos, zone.Shape, (int)zone.Effect);
+      _zoneTriggerCounts[zoneIdx]++;
+      _zoneTriggerPositions[zoneIdx] = hogPos;
     }
   }
 
@@ -232,9 +244,6 @@ public sealed partial class SquadMultiMeshInstance3D
   private static readonly int DamageAccumOffset = Marshal
     .OffsetOf<GpuBody>(nameof(GpuBody.DamageAccum))
     .ToInt32();
-
-  // Reused 4-byte scratch for encoding the damage value (zero per-call allocation).
-  private readonly byte[] _damageEncodeBytes = new byte[sizeof(uint)];
 
   /// <summary>
   /// Adds zone damage for a hog to this pass's running total. Nothing is written until
@@ -269,8 +278,10 @@ public sealed partial class SquadMultiMeshInstance3D
     var damageAccumOff = (uint)((index * GpuBodySize) + DamageAccumOffset);
     // damage_accum is a uint encoded as damage × 256 (matching DAMAGE_SCALE in the shader).
     var encoded = (uint)(damage * 256.0f);
-    _ = BitConverter.TryWriteBytes(_damageEncodeBytes, encoded);
-    EnqueueGpuWrite(GpuTarget.Physics, damageAccumOff, _damageEncodeBytes);
+    _ = BitConverter.TryWriteBytes(
+      ReserveGpuWrite(GpuTarget.Physics, damageAccumOff, sizeof(uint)),
+      encoded
+    );
   }
 
   private static long TriggerKey(int hogIndex, int zoneIndex) =>

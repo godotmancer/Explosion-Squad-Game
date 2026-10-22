@@ -18,14 +18,16 @@ func _ready() -> void:
   initial_triggers = allowed_triggers
   material = mesh_instance_3d.get_active_material(0) as StandardMaterial3D
 
+# `count` hogs entered `_zone` this tick; `_position` is where the last of them did. One flash
+# and one announcement per call, however many there were.
 func trigger(
-  _hog_index: int,
+  count: int,
   _position: Vector3,
   _zone: CollisionShape3D,
   _effect: int,
   show_fx: bool = true
   ) -> void:
-  allowed_triggers -= 1
+  allowed_triggers -= count
   if show_fx:
     _play_fx(_position, _zone, _effect)
 

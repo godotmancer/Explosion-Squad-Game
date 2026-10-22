@@ -1,6 +1,7 @@
 namespace ExplosionSquadGame.compute_shaders;
 
 using System;
+using System.Runtime.InteropServices;
 using Godot;
 
 public sealed partial class SquadMultiMeshInstance3D
@@ -69,7 +70,35 @@ public sealed partial class SquadMultiMeshInstance3D
       );
     }
 
-    EmitSignal(SignalName.HogDied, index, position, stateBits);
+    // Only a hog holding a label has one to release.
+    if (_labeledSet.Remove(index))
+    {
+      _ = HogLabels?.Call(_releaseLabelMethod, index);
+    }
+
+    _deadHogCount++;
+    _diedIndices.Add(index);
+    _diedPositions.Add(position);
+    _diedStateBits.Add((int)stateBits);
+  }
+
+  /// <summary>Reports this tick's deaths to GDScript in one <c>HogsDied</c> signal.</summary>
+  private void EmitHogsDied()
+  {
+    if (_diedIndices.Count == 0)
+    {
+      return;
+    }
+
+    EmitSignal(
+      SignalName.HogsDied,
+      Variant.CreateFrom(CollectionsMarshal.AsSpan(_diedIndices)),
+      Variant.CreateFrom(CollectionsMarshal.AsSpan(_diedPositions)),
+      Variant.CreateFrom(CollectionsMarshal.AsSpan(_diedStateBits))
+    );
+    _diedIndices.Clear();
+    _diedPositions.Clear();
+    _diedStateBits.Clear();
   }
 
   private void DropBomb(Vector3 hit) => Detonate(hit, BombRadius, BombForce, BombDamage);
@@ -150,9 +179,11 @@ public sealed partial class SquadMultiMeshInstance3D
       _activeBombs[i] = bomb;
     }
 
-    // Upload only the active slice (zero alloc)
-    var byteCount = _activeBombs.Count * BOMB_STRIDE * sizeof(float);
-    Buffer.BlockCopy(_bombStaging, 0, _bombBytes, 0, byteCount);
-    EnqueueGpuWrite(GpuTarget.Bombs, 0, _bombBytes.AsSpan(0, byteCount));
+    // Upload only the active slice, straight from the staging floats (zero alloc)
+    EnqueueGpuWrite(
+      GpuTarget.Bombs,
+      0,
+      MemoryMarshal.AsBytes(_bombStaging.AsSpan(0, _activeBombs.Count * BOMB_STRIDE))
+    );
   }
 }

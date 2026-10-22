@@ -9,11 +9,11 @@ public sealed partial class SquadMultiMeshInstance3D
   private void SetupMultiMesh()
   {
     // DrawHogs uploads DRAW_STRIDE floats a hog: transform and colour, no custom data. The
-    // format can only change while the MultiMesh is empty.
+    // format can only change while the MultiMesh is empty, and it stays empty here: DrawHogs
+    // sizes it to the hogs it draws.
     Multimesh.InstanceCount = 0;
     Multimesh.UseColors = true;
     Multimesh.UseCustomData = false;
-    Multimesh.InstanceCount = NumBodies;
 
     // The footprint physics keeps out of walls: the drawn mesh's XZ bounds. Falls back to a
     // BodyRadius square when there is no mesh to measure.
@@ -43,12 +43,10 @@ public sealed partial class SquadMultiMeshInstance3D
     // --- Pre-allocate staging buffers (reused every frame, zero GC pressure) ---
     _physicsPushBytes = new byte[PHYSICS_PUSH_SIZE];
     _bombStaging = new float[MAX_BOMBS * BOMB_STRIDE];
-    _bombBytes = new byte[MAX_BOMBS * BOMB_STRIDE * sizeof(float)];
 
     // Initial obstacle capacity — grown if needed, never shrunk
     _obstacleCapacity = 64 * OBSTACLE_STRIDE; // room for 64 obstacles
     _obstacleStaging = new float[_obstacleCapacity];
-    _obstacleBytes = new byte[_obstacleCapacity * sizeof(float)];
 
     // --- Physics shader ---
     var physicsFile = GD.Load<RDShaderFile>("res://compute_shaders/physics_compute.glsl");
@@ -62,6 +60,7 @@ public sealed partial class SquadMultiMeshInstance3D
     _hogStates = new byte[_bodyCapacity];
     _zoneMasks = new ulong[_bodyCapacity];
     _deadHogs = new bool[_bodyCapacity];
+    _liveHogs = new int[_bodyCapacity];
 
     for (var i = 0; i < NumBodies; i++)
     {
@@ -95,19 +94,12 @@ public sealed partial class SquadMultiMeshInstance3D
 
     // --- Obstacle buffer — created at full staging capacity so runtime growth is rare ---
     ExtractObstacles(0f); // first frame: no velocity data yet
-    if (_numObstacles > 0)
-    {
-      Buffer.BlockCopy(
-        _obstacleStaging,
-        0,
-        _obstacleBytes,
-        0,
-        _numObstacles * OBSTACLE_STRIDE * sizeof(float)
-      );
-    }
-
-    _obstacleBufferSize = (uint)_obstacleBytes.Length;
-    _obstacleBuffer = _rd.StorageBufferCreate(_obstacleBufferSize, _obstacleBytes);
+    _obstacleBufferSize = (uint)(_obstacleCapacity * sizeof(float));
+    _obstacleBuffer = _rd.StorageBufferCreate(
+      _obstacleBufferSize,
+      (ReadOnlySpan<byte>)MemoryMarshal.AsBytes(_obstacleStaging.AsSpan()),
+      0 // no usage flags (the span overload has no defaults)
+    );
 
     // --- Bomb buffer (pre-allocated to MAX_BOMBS) ---
     _bombBufferSize = MAX_BOMBS * BOMB_STRIDE * sizeof(float);
@@ -157,10 +149,11 @@ public sealed partial class SquadMultiMeshInstance3D
     _projHitCallbacks = new Action<Vector3>[MAX_PROJECTILES];
     _projPendingUpload = new bool[MAX_PROJECTILES];
     _projAllStagingFloats = new float[MAX_PROJECTILES * PROJ_STRIDE];
-    _projSlotUploadBytes = new byte[PROJ_STRIDE * sizeof(float)];
-    for (var i = 0; i < MAX_PROJECTILES; i++)
+    // Pushed highest first, so slots are handed out from 0 up and the live ones stay packed at
+    // the bottom: the dispatch and the readback cover only [0, _projHighWater).
+    for (var i = MAX_PROJECTILES - 1; i >= 0; i--)
     {
-      _projFreeSlots.Enqueue(i);
+      _projFreeSlots.Push(i);
     }
 
     RebuildProjectileUniformSet();

@@ -89,7 +89,7 @@ Explosion-Squad-Game/
 │   ├── SquadMultiMeshInstance3D.GpuQueue.cs # Deferred GPU command queue + buffer growth
 │   ├── SquadMultiMeshInstance3D.Obstacles.cs# Obstacle cache, OBB/circle emit, UpdateObstacleBuffer
 │   ├── SquadMultiMeshInstance3D.Projectiles.cs # Slot pool, SpawnProjectile, UploadPending
-│   ├── SquadMultiMeshInstance3D.Bombs.cs    # Bomb buffer, death FX pool, OnHogDied
+│   ├── SquadMultiMeshInstance3D.Bombs.cs    # Bomb buffer, death FX pool, OnHogDied, HogsDied
 │   ├── SquadMultiMeshInstance3D.TriggerZones.cs # Zone detection, deferred spawns
 │   ├── SquadMultiMeshInstance3D.Labels.cs   # Distance-sorted label assignment
 │   ├── SquadMultiMeshInstance3D.Drawing.cs  # Frustum culling + the MultiMesh upload
@@ -144,9 +144,10 @@ CPU                                 GPU
  │   ├─ Sync()                       │
  │   ├─ advance hash frame stamp     │
  │   ├─ BufferGetData(transformBuffer)  ← only CPU read per frame (the rows it dispatched)
- │   ├─ Detect deaths (STATE_DEAD)   │
- │   ├─ ProcessTriggerZones          │  (CPU-side shape tests on transform data)
- │   └─ keep the readback for DrawHogs
+ │   ├─ ReadbackPass                 │  ONE walk over the rows: new deaths (STATE_DEAD),
+ │   │                               │  the live-hog list, trigger-zone shape tests
+ │   ├─ HogsDied / ZoneTriggered     │  one signal per tick / per zone entered
+ │   └─ keep the readback + live list for DrawHogs
  │                                   │
  ├─ UpdateProjectileLifetimes etc.   │  (may read GPU buffers: after the Sync above)
  ├─ WritePhysicsPush                 │
@@ -159,7 +160,7 @@ CPU                                 GPU
  │   ├─ Dispatch spatial_hash_build  ┤─ writes hash_counts[], hash_entries[]
  │   ├─ ComputeListAddBarrier        │
  │   ├─ Dispatch projectile_compute  ┤─ moves projectiles, sphere-sphere hit,
- │   │                               │  atomic damage_accum on bodies[]
+ │   │   (skipped if none is live)   │  atomic damage_accum on bodies[]
  │   ├─ ComputeListAddBarrier        │
  │   └─ Dispatch physics_compute     ┤─ boids, obstacle avoidance, bombs, fear
  │                                   │  impulses, contagion spread, THEN writes
@@ -168,7 +169,8 @@ CPU                                 GPU
  └─ Submit()                         │  ← no Sync: runs while the frame is processed + drawn
 
 _Process — once per rendered frame, after that frame's physics ticks
- └─ DrawHogs()                          latest readback → hogs in the camera's view
+ └─ DrawHogs()                          live list → hogs in the camera's view
+     ├─ resize MultiMesh if drawn > InstanceCount or < half of it
      ├─ MultimeshSetCustomAabb
      └─ MultimeshSetBuffer               ← the only MultiMesh upload
 ```
@@ -195,6 +197,14 @@ The test is six plane checks per hog, with planes taken from the camera's projec
 moved into the squad node's space; it was checked against `Camera3D.GetFrustum()` with zero
 disagreements, perspective and orthographic.
 
+The MultiMesh is sized to what `DrawHogs` draws, not to the body capacity: `MultimeshSetBuffer`
+takes exactly `InstanceCount` rows, so every slot past the drawn ones was uploaded every frame
+for nothing. It grows to 1.25× the drawn count once that no longer fits and shrinks once it
+draws under half, never below `MULTIMESH_MIN_INSTANCES` (1024) nor above `_bodyCapacity` — a
+crowd entirely in view uploads no more than the capacity-sized MultiMesh did. A resize clears the
+MultiMesh; the upload in the same call refills it, so nothing flickers. `DrawHogs` walks only
+`_liveHogs`, the readback's live rows listed by `ReadbackPass`, never a corpse.
+
 **Critical ordering constraint:** hash build → projectile → physics.
 The projectile shader atomically writes `damage_accum` into `bodies[]` which the
 physics shader reads the same frame. The barrier between them is mandatory.
@@ -202,7 +212,7 @@ physics shader reads the same frame. The barrier between them is mandatory.
 **There is no fourth pass.** `transform_compute.glsl` was deleted; physics_compute writes
 the instance buffer in its tail via binding 5, as five coalesced `vec4` stores, reusing the
 `Body` it already has in registers. Dead bodies take an early-out path that still writes
-their `INSTANCE_CUSTOM` row (so the CPU death loop can see `STATE_DEAD`) and skip
+their `INSTANCE_CUSTOM` row (so the CPU readback pass can see `STATE_DEAD`) and skip
 everything else. The C# field is still named `_transformBuffer` — the name outlived the
 shader.
 
@@ -245,11 +255,11 @@ mechanism — it preserves the public API and requires no scene-file changes.
 |------|-----------------|
 | `SquadMultiMeshInstance3D.cs` | All `[Export]` properties, all inner types (`GpuBody`, `BombState`, `ProjectileAbility`, enums), all `[Signal]` declarations, all private field declarations, all buffer-layout constants, lifecycle (`_Ready` / `_Process` / `_PhysicsProcess` + `CompleteGpuTick` / `_UnhandledInput`), `SpawnHogs`, `UpdateTargetFromMouse` |
 | `GpuSetup.cs` | `SetupCompute`, `SetupMultiMesh`, `Dispose`, `WriteXxxPush`, `RebuildXxxUniformSet`, `VerifyPipeline`, `SampleHashOverflow` |
-| `GpuQueue.cs` | `GpuTarget` / `GpuCommandKind` enums, `GpuCommand` struct, `_gpuCommands` / `_gpuPayload`, `EnqueueGpuWrite`, `EnqueueGpuClear`, `EnqueueGrowPhysics`, `EnqueueGrowObstacles`, `FlushGpuCommands`, `ResolveGpuTarget`, `ApplyPhysicsGrowth`, `ApplyObstacleGrowth`, `FreeGpuRid`. **The only file allowed to call `RenderingDevice` mutators.** |
+| `GpuQueue.cs` | `GpuTarget` / `GpuCommandKind` enums, `GpuCommand` struct, `_gpuCommands` / `_gpuPayload`, `ReserveGpuWrite`, `EnqueueGpuWrite`, `EnqueueGpuClear`, `EnqueueGrowPhysics`, `EnqueueGrowObstacles`, `FlushGpuCommands`, `ResolveGpuTarget`, `ApplyPhysicsGrowth`, `ApplyObstacleGrowth`, `FreeGpuRid`. **The only file allowed to call `RenderingDevice` mutators.** |
 | `Obstacles.cs` | Obstacle cache, `ExtractObstacles`, `EmitObstacleDataArray/List`, `WriteObstacle`, `ComputeMinObb`, `DecomposeTrimeshFootprint`, `ObstacleSlotCount`, `FindCollisionShapes`, `UpdateObstacleBuffer` |
 | `Projectiles.cs` | `SpawnProjectile`, `UploadPendingProjectiles`, `UpdateProjectileLifetimes`, `RegisterProjectileHitCallback`, `WriteProjectilePush` |
-| `Bombs.cs` | `DrainDeathFxQueue`, `OnDeathFxFinished`, `OnHogDied`, `DropBomb`, `UpdateBombBuffer` |
-| `TriggerZones.cs` | `ProcessTriggerZones`, `OnZoneEntered`, `QueueZoneDamage`, `FlushZoneDamage`, `DamageHogViaBuffer`, `ScanForTriggers`, `GetTriggerBounds`, `IsInsideCircle/OBB`, `TriggerKey` |
+| `Bombs.cs` | `DrainDeathFxQueue`, `OnDeathFxFinished`, `OnHogDied`, `EmitHogsDied`, `DropBomb`, `Detonate`, `UpdateBombBuffer` |
+| `TriggerZones.cs` | `BeginTriggerZonePass`, `TestTriggerZones`, `EndTriggerZonePass`, `OnZoneEntered`, `QueueZoneDamage`, `FlushZoneDamage`, `DamageHogViaBuffer`, `ScanForTriggers`, `GetTriggerBounds`, `IsInsideCircle/OBB`, `TriggerKey` |
 | `Labels.cs` | `_timeSinceLastLabelUpdate` field, `UpdateLabels`, `ClassifyState`, `IsLabelOnScreen` |
 | `Drawing.cs` | `DrawHogs` (frustum cull, custom AABB, `MultimeshSetBuffer`), `BuildCullPlanes`, `ToNodeSpace`, `IsOutside` |
 
@@ -328,7 +338,7 @@ projectile_compute (hits) — keep the two identical. Consequences to preserve:
   the same DPS.
 - The `STATE_ON_FIRE / POISONED / DRUNK` bits are **derived** every frame from the live types
   (`STATE_ON_FIRE << t`), never stored or set by another invocation. So they clear on the frame
-  their type lapses, and `HogDied`'s `stateBits` (which `DrawableGround.gd` colours the death
+  their type lapses, and `HogsDied`'s `stateBits` (which `DrawableGround.gd` colours the death
   decal by) are exact. A type a neighbour hands a hog mid-dispatch shows up a frame later.
 - Spread hands the neighbour a *fraction* of the parent's remaining time
   (`CONTAGION_SPREAD_DECAY = 0.6`), capped per type (`FIRE_SPREAD_MAX_DUR`,
@@ -358,15 +368,16 @@ drawn and reached the GPU's ground 0.25 m under the visible floor.
 
 `INSTANCE_STRIDE = 20` floats per instance = `INSTANCE_VEC4S = 5` vec4 rows, matching Godot's
 row-major MultiMesh layout. Slots 16–19 are `INSTANCE_CUSTOM` (R/G/B/A). Slot 17
-(`INST_HEALTH`) and slot 18 (`INST_STATE`) are read back every frame by the death loop in
-`CompleteGpuTick`, the trigger zone tests and `DrawHogs`.
+(`INST_HEALTH`) and slot 18 (`INST_STATE`) are read back every frame and read by `ReadbackPass`
+in `CompleteGpuTick` (deaths, trigger zones) and by `DrawHogs`.
 
 The custom row only feeds the CPU: the hog shader reads `COLOR` alone. So the MultiMesh itself
 carries no custom data — `SetupMultiMesh` forces `UseColors = true`, `UseCustomData = false` —
 and `DrawHogs` uploads the first `DRAW_STRIDE = 16` floats of each row (transform + colour),
-20% less than the readback's stride. `_transformFloats` (the upload) is `capacity × DRAW_STRIDE`;
-`_transformBuffer` (the GPU instance buffer) stays `capacity × INSTANCE_STRIDE`. If a hog shader
-ever needs `INSTANCE_CUSTOM`, turn custom data back on and upload all 20.
+20% less than the readback's stride. `_transformFloats` (the upload staging) is grow-only, and
+only its first `InstanceCount × DRAW_STRIDE` floats are uploaded; `_transformBuffer` (the GPU
+instance buffer) is `capacity × INSTANCE_STRIDE`. If a hog shader ever needs `INSTANCE_CUSTOM`,
+turn custom data back on and upload all 20.
 
 The shader declares the buffer as `vec4 instances[]` and indexes rows, so the C# float indices
 map as `INST_ROW_CUSTOM = 4` ↔ `INST_CUSTOM_R = 16`. Keep both sides in step: the C# constants
@@ -443,7 +454,7 @@ GDScript (Main.gd — paced by each ability's fire_interval)
        │  ability.launch_angle_deg (a lob that lands on `to`), then spread + speed variance
        ├─ ProjectilesSpawner.SpawnProjectileWithVelocity(pos, vel, ability)
        │    └─ SquadMultiMeshInstance3D.SpawnProjectile(pos, vel, ability)
-       │         ├─ Dequeue slot from _projFreeSlots
+       │         ├─ Pop the lowest free slot from _projFreeSlots, raise _projHighWater
        │         ├─ Write floats into _projAllStagingFloats[slot * PROJ_STRIDE + ...]
        │         │  (heights shifted into simulation space — see §7)
        │         └─ Enqueue slot index into _pendingProjSpawns
@@ -544,10 +555,11 @@ angle, even in the first few frames while the head is still turning up to it.
 
 ```
 projectile_compute.glsl clears PROJ_FLAG_ALIVE in flags slot
-  → UpdateProjectileLifetimes() detects flag cleared (readback every 2 frames)
+  → UpdateProjectileLifetimes() detects flag cleared (readback every 2 frames,
+    of the slots below _projHighWater only)
        ├─ Fires _projHitCallbacks[slot](hitPos)
        │    └─ ProjectileBase._on_gpu_hit(pos) → kill(pos, HitType.HOG)
-       └─ Clears alive flag in GPU buffer, enqueues slot back to _projFreeSlots
+       └─ Clears alive flag in GPU buffer, pushes slot back onto _projFreeSlots
 ```
 
 ### Kill path (lifetime expiry)
@@ -559,8 +571,16 @@ ability.lifetime runs out in flight (nothing hit, ground never reached)
   │        (no projectile_impact, no explosion — it hit nothing)
   └─ C#: _projLifetimes[slot] (lifetime + PROJ_LIFETIME_GRACE) ticks to zero
        → Writes _zeroFlagBytes to GPU PROJ_FLAGS offset (safety net)
-       → Enqueues slot back to _projFreeSlots
+       → Pushes slot back onto _projFreeSlots
 ```
+
+`_projFreeSlots` is a stack, filled so that slot 0 comes out first: live projectiles stay packed
+at the bottom, and `_projHighWater` — one past the highest slot in use, lowered past free slots
+at the end of `UpdateProjectileLifetimes` — bounds the projectile dispatch (`num_projectiles`
+push constant), the flag readback and the C# slot loops. With no projectile live the projectile
+dispatch and its barrier are skipped. Every slot at or above the mark is dead on the GPU: killed
+there, or by the `_zeroFlagBytes` write, which lands before the next dispatch. It used to be a
+FIFO queue that cycled through all 1024 slots, so all of them were dispatched and read back.
 
 C# fires **no hit callback** for a lifetime expiry: by then the slot is inside its grace window,
 which `ReclaimGpuKilledProjectiles` skips. So the node has to expire itself — before it did, a
@@ -583,7 +603,7 @@ potentially-nil Godot properties.
 | Category | Node path | GPU buffer | Detected by |
 |----------|-----------|------------|-------------|
 | Solid obstacles | `ObstaclesRoot/Static/*` or `ObstaclesRoot/Movable/*`, **no** trigger metadata | Yes — pushed to obstacle buffer every frame | GPU physics shader |
-| Trigger zones | Any `CollisionShape3D` with metadata key `damage`, `multiply`, or `add` | **No** — hogs pass through | CPU, `ProcessTriggerZones()` reads transform readback |
+| Trigger zones | Any `CollisionShape3D` with metadata key `damage`, `multiply`, or `add` | **No** — hogs pass through | CPU, `ReadbackPass` → `TestTriggerZones` on the transform readback |
 
 ### Cache lifecycle
 
@@ -591,7 +611,7 @@ potentially-nil Godot properties.
 null until first use (`EnsureObstacleCache()`), then held until `InvalidateObstacleCache()`
 is called. Visibility changes on any `Node3D` under `ObstaclesRoot` auto-fire
 `InvalidateObstacleCache` via connected signals — **except** trigger zone shapes
-(connecting them would race with `ProcessTriggerZones`).
+(connecting them would race with the trigger-zone pass).
 
 ### Movable obstacles
 
@@ -662,16 +682,24 @@ Global.gd signals:
   notification_wrapped                                 ← fired when UI notification wraps
 
 SquadMultiMeshInstance3D C# signals:
-  HogDied(index, position, stateBits)               ← fired in OnHogDied()
-  HogZoneTriggered(hogIndex, position, zone, effect)  ← fired in ProcessTriggerZones(), whether or
-                                                        not ShowHogs: GateTrigger counts down on it
+  HogsDied(indices, positions, stateBits)           ← once per tick with that tick's deaths, as
+                                                      three parallel packed arrays (EmitHogsDied)
+  ZoneTriggered(zone, effect, count, position)      ← once per tick per zone hogs entered, with how
+                                                      many and where the last one was
+                                                      (EndTriggerZonePass); whether or not ShowHogs
   HogStateChanged(index, newState, worldPos)        ← declared, unused (available for GDScript)
 ```
 
-`GateTrigger.trigger` takes a `show_fx` flag (`HogZoneTriggers.gd` passes the squad's
-`ShowHogs`): with the crowd hidden the gate still counts its triggers and closes, but skips its
-flash and `Announce3D`. The signal used to be suppressed outright while hogs were hidden, so
-gates never closed then.
+Both used to fire once per hog — `HogDied(index, position, stateBits)` and
+`HogZoneTriggered(hogIndex, position, zone, effect)` — so a bomb killing ten thousand hogs, or a
+crowd pouring through a gate, made that many Variant-marshalled calls into GDScript in one tick,
+each handler instancing nodes. No script runs during the readback pass any more: both are
+emitted after it. The death count for the HUD is a property, `DeadHogCount`, like `AliveHogCount`.
+
+`GateTrigger.trigger(count, position, zone, effect, show_fx)` counts down by `count` and plays
+one flash and one `Announce3D` per call, however many hogs entered that tick. `show_fx` is the
+squad's `ShowHogs` (`HogZoneTriggers.gd` passes it): with the crowd hidden the gate still counts
+its triggers and closes, but skips its flash and announcement.
 
 GDScript components connect to C# signals using Godot's `connect()` or `+=` syntax.
 When connecting from GDScript to a C# signal with a deferred connection
@@ -689,11 +717,15 @@ Key mechanisms:
 
 - **Push constants:** `byte[]` pre-allocated in `SetupCompute`, overlaid with
   `MemoryMarshal.Cast<byte, float/int/uint>` spans.
-- **Obstacle staging:** `float[] _obstacleStaging` + `byte[] _obstacleBytes` grown
-  with headroom, never shrunk, copied with `Buffer.BlockCopy`.
+- **Obstacle staging:** `float[] _obstacleStaging` grown with headroom, never shrunk, and
+  queued straight from the floats with `MemoryMarshal.AsBytes` (as are the bomb and projectile
+  staging floats); there is no separate byte copy any more.
 - **Projectile staging:** `float[] _projAllStagingFloats` (size `MAX_PROJECTILES *
-  PROJ_STRIDE`) written in `SpawnProjectile`, copied per-slot in
-  `UploadPendingProjectiles` into `byte[] _projSlotUploadBytes`.
+  PROJ_STRIDE`) written in `SpawnProjectile`, queued per slot in `UploadPendingProjectiles`.
+- **Hog spawns:** `SpawnHogs` writes its `GpuBody` structs straight into the queue's payload
+  through `ReserveGpuWrite` + `MemoryMarshal.Cast<byte, GpuBody>`, not into a new array.
+- **Batched signals:** `HogsDied`'s three arrays come from `List`s cleared each tick and passed
+  as spans (`Variant.CreateFrom(CollectionsMarshal.AsSpan(...))`).
 - **Movable obstacle state:** two `Dictionary<CollisionShape3D, (Vector2, float)>`
   swapped each frame via tuple assignment — no new dictionary allocated.
 - **Label sets:** two `HashSet<int>` swapped after each full recalculation.
@@ -734,13 +766,16 @@ Mutating a shared resource directly changes it for every future spawn.
 
 ### Deferred GPU writes
 
-GPU writes are queued (`EnqueueGpuWrite`) and applied by `FlushGpuCommands` just before the
-next dispatch. Writes queued in `CompleteGpuTick` (trigger-zone damage) or in the staging calls
-after it (projectile reclaim) therefore reach the dispatch submitted later in the same
-`_PhysicsProcess`. This is the expected pattern for `DamageHogViaBuffer` and projectile reclaim
-writes.
+GPU writes are queued (`EnqueueGpuWrite`, or `ReserveGpuWrite` to fill the payload in place) and
+applied by `FlushGpuCommands` just before the next dispatch. Writes queued in `CompleteGpuTick`
+(trigger-zone damage) or in the staging calls after it (projectile reclaim) therefore reach the
+dispatch submitted later in the same `_PhysicsProcess`. This is the expected pattern for
+`DamageHogViaBuffer` and projectile reclaim writes.
 
-A write *replaces* the bytes it covers; the queue does not merge two writes to the same word.
+A write that continues the previous command — same target, next offset — is merged into it, so a
+run of `SpawnHogs(1)` calls from a gate, or consecutive projectile slots, is one `BufferUpdate`.
+Only adjacent writes merge; a write *replaces* the bytes it covers, and two writes to the same
+word are not summed.
 `DamageHogViaBuffer` relies on physics zeroing `damage_accum` every frame, so it must run at
 most once per hog per frame — trigger zones sum their damage per hog with `QueueZoneDamage` and
 write it once in `FlushZoneDamage`. Two direct calls in one frame keep only the last.
@@ -786,25 +821,25 @@ These are non-negotiable. Do not introduce patterns that violate them.
    throttled projectile flag readback, and the 1 Hz hash-overflow sample (which only runs
    when `DebugHashOverflow` is set).** Each `BufferGetData` forces a GPU sync stall.
 
-4a. **All GPU buffer mutations go through `EnqueueGpuWrite` / `EnqueueGpuClear` / `EnqueueGrowXxx`.** Do not call
+4a. **All GPU buffer mutations go through `EnqueueGpuWrite` / `ReserveGpuWrite` / `EnqueueGpuClear` / `EnqueueGrowXxx`.** Do not call
    `_rd.BufferUpdate`, `_rd.BufferCopy` or `_rd.BufferClear` outside `GpuQueue.cs`. See §5.
 
 4b. **Read back only the live prefix.** The transform readback is
    `_gpuTickBodies * INSTANCE_STRIDE * sizeof(float)` — the bodies that dispatch covered — not
    the full `_bodyCapacity`. Every consumer takes its count from the span it is handed, so copying
    the slack was pure waste.
-   `BODY_CAPACITY_GROWTH` is 1.25 with a `BODY_CAPACITY_MIN_STEP` of 256 — the old 2× doubling
-   left up to half the buffer unused. Note the tension: growth is amortised O(1) at 2× and
-   worse at 1.25×, which is acceptable here only because growth is rare and the per-frame
-   readback saving is constant.
+   `BODY_CAPACITY_GROWTH` is 2 with a `BODY_CAPACITY_MIN_STEP` of 256. It was 1.25 while the
+   MultiMesh was sized to the capacity and uploaded in full every frame; now that it is sized
+   to the drawn hogs, spare capacity costs only VRAM, and doubling keeps growth (a GPU copy of
+   every body plus three uniform-set rebuilds) rare while gates keep adding hogs.
 
-5. **Projectile flag readback is throttled to every 2 physics frames.** It only
-   runs when at least one uploaded slot is active. Do not remove the `anyActive`
-   guard.
+5. **Projectile flag readback is throttled to every 2 physics frames**, and covers only the
+   slots below `_projHighWater` (§8). It only runs when at least one uploaded slot is active.
+   Do not remove the `AnyProjectileActiveOnGpu` guard.
 
 6. **Dead hogs are never removed from the body buffer.** `STATE_DEAD` is the
-   authoritative marker. `DrawHogs` skips dead bodies when building the
-   MultiMesh buffer. Body indices are permanent for the lifetime of the scene. The death loop
+   authoritative marker. `DrawHogs` walks only the live list, so corpses never reach the
+   MultiMesh buffer. Body indices are permanent for the lifetime of the scene. The readback pass
    remembers which deaths it has handled in `_deadHogs`, a `bool[]` sized to `_bodyCapacity` and
    grown in `SpawnHogs` — it was a `HashSet<int>`, probed for every corpse on every tick.
 
@@ -812,7 +847,8 @@ These are non-negotiable. Do not introduce patterns that violate them.
    view.** Do not upload it from the tick again, and do not turn `FrustumCulling` off to make a
    count come out right: `Multimesh.VisibleInstanceCount` is the number drawn, `AliveHogCount` the
    number alive. Keep setting the custom AABB before `MultimeshSetBuffer`, so that Godot does not
-   rebuild one from every row of the buffer (0.36 vs 1.13 ms per upload at 100k).
+   rebuild one from every row of the buffer (0.36 vs 1.13 ms per upload at 100k). Keep the
+   MultiMesh sized by `DrawHogs` (§5); do not tie `InstanceCount` to the body capacity again.
 
 6b. **Every GPU write goes through `BufferUpdate`'s `ReadOnlySpan<byte>` overload**, sliced to the
    payload. The `byte[]` overload marshals the whole array, so handing it a grow-only scratch
@@ -897,6 +933,13 @@ than the idle `Sync` suggested, presumably because compute and rendering share t
   frame, consistent but inside the noise floor. Frames are now cheap enough that shadows no
   longer dominate this scene the way the 20k table above shows.
 
+- **Mass deaths.** A bomb killing a settled pile of 50k hogs at once, measured over the 60 frames
+  after it, 3 interleaved pairs: worst `_PhysicsProcess` 40 → 16 ms, worst frame 48 → 24 ms, from
+  batching `HogDied` into `HogsDied`, the single readback pass and the `DrawableGround` ring.
+  Steady-state frame time at 100k did not move measurably (the run was pinned at the display's
+  120 Hz by driver vsync); the MultiMesh upload now follows the drawn count, e.g. 1.3k rows
+  instead of the 30k capacity after a bomb.
+
 - **The cliff is the physics catch-up, not linear cost.** Physics is fixed at 60 Hz; once a tick
   plus the frame's drawing exceeds 16.7 ms, Godot runs extra ticks per frame (up to
   `max_physics_steps_per_frame`, 8), and every tick here is a full dispatch + `Sync`. Before the
@@ -960,14 +1003,14 @@ one. That is what happened to `transform_compute`: a separate pass had to re-rea
 2. Add the metadata key to the `HasMeta` checks in `FindCollisionShapes`
    (Obstacles.cs) and `ConnectVisibilitySignals` (Obstacles.cs).
 3. Add a case to `ScanForTriggers` (TriggerZones.cs).
-4. Add a case to the `switch (zone.Effect)` in `ProcessTriggerZones` (TriggerZones.cs).
+4. Add a case to the `switch (zone.Effect)` in `OnZoneEntered` (TriggerZones.cs).
 
 ### Add a new GDScript visual component
 
 1. Create the script under `components/` or `visuals/`.
 2. Connect to `Global` signals rather than to specific nodes.
-3. If it needs hog position data, connect to `HogDied` or
-   `HogZoneTriggered` on the `SquadMultiMeshInstance3D` node — do not read
+3. If it needs hog position data, connect to `HogsDied` or
+   `ZoneTriggered` on the `SquadMultiMeshInstance3D` node — do not read
    the physics buffer directly from GDScript.
 
 ### Modify the obstacle buffer layout
@@ -1029,7 +1072,7 @@ CPU. `SpawnHogs` enqueues `EnqueueGrowPhysics`; it does not resize anything dire
 
 ### Trigger zones are one pass with a bitmask per hog — keep them that way
 
-`ProcessTriggerZones` walks the readback once, testing each hog against every zone (a world-aligned
+`ReadbackPass` walks the readback once, and `TestTriggerZones` tests each live hog against every zone (a world-aligned
 box reject from `GetTriggerBounds`, then the exact circle / OBB). Occupancy is a `ulong` per hog in
 `_zoneMasks`, bit *z* for zone *z*, so an enter is `inside & ~previous`. It used to keep a
 `HashSet<int>` of occupants per zone and walk every hog once per zone: at 100k hogs and four zones
@@ -1043,15 +1086,19 @@ Behaviour the masks preserve:
 - When `_triggerZones` is rebuilt (a new list), `_zoneMasks` is cleared: every hog inside a zone
   enters it again, as it did when rebuilt zones started with empty occupant sets.
 - At most `MAX_TRIGGER_ZONES = 64` zones are tested (one bit each); extras are ignored with a warning.
-- `_zoneMasks` is sized to `_bodyCapacity` and grown with `_hogStates` in `SpawnHogs`. The scan holds
-  a span over it, re-taken if a `HogZoneTriggered` handler spawned hogs and grew it mid-pass.
+- `_zoneMasks` is sized to `_bodyCapacity` and grown with `_hogStates` in `SpawnHogs`. Nothing can
+  grow it mid-pass: Multiply/Add spawns are deferred to `EndTriggerZonePass`, and `ZoneTriggered`
+  is emitted only after the walk, so no script runs during it.
+- The pass is one walk with the death check and the live list (`ReadbackPass`), not a walk of its
+  own: `BeginTriggerZonePass` resolves the zones, `EndTriggerZonePass` applies damage, spawns and
+  signals. Keep new per-hog CPU work in that walk rather than adding another over 8 MB of rows.
 
 ### Trigger zone shapes must not connect VisibilityChanged
 
 `ConnectVisibilitySignals` explicitly skips shapes with `damage` / `multiply` / `add`
 metadata. If a new trigger effect key is added, it must be added to the `isTriggerZone`
 check there, or visibility toggles on trigger shapes will null `_triggerZones`
-mid-iteration in `ProcessTriggerZones`.
+mid-pass.
 
 ### `MemoryMarshal.Cast` shares the same backing bytes
 
@@ -1099,15 +1146,13 @@ next one syncs it. Consequences for new code:
 - **Use the readback's count, not `NumBodies`.** Hogs spawned since the dispatch (from `_Process`,
   or by the trigger-zone pass) have no row in the instance buffer yet, and the capacity growth
   they queued is only applied at the next flush — the buffer may be smaller than `NumBodies` rows.
-  The readback covers `_gpuTickBodies`; the death loop, `UpdateLabels`, `ProcessTriggerZones`
-  and `DrawHogs` take their count from the span.
-- **Growth clears the MultiMesh.** `ApplyPhysicsGrowth` resizes `Multimesh.InstanceCount`, which
-  clears it. It runs in a tick, and `DrawHogs` refills the MultiMesh from the last readback in
-  `_Process` before the frame is drawn, so nothing flickers (0 blank frames over a 10k → 38k spawn
-  run; before the upload moved out of the tick it was 11 until the growth re-uploaded itself).
-  Note that `Multimesh.VisibleInstanceCount` still reads the old value after the resize, so a test
-  has to look at `RenderingServer.MultimeshGetBuffer`, from `RenderingServer.FramePreDraw`, to see
-  a blank frame.
+  The readback covers `_gpuTickBodies`; `ReadbackPass`, `UpdateLabels` and `DrawHogs` take their
+  count from the span or from the live list built from it.
+- **Growth leaves the MultiMesh alone.** `ApplyPhysicsGrowth` resizes the body and instance
+  buffers only; the MultiMesh is sized by `DrawHogs` (§5), which resizes and refills it in the
+  same call. To test for a blank frame, note that `Multimesh.VisibleInstanceCount` still reads
+  the old value after a resize: look at `RenderingServer.MultimeshGetBuffer`, from
+  `RenderingServer.FramePreDraw`.
 
 ### Do not mark the body buffer `coherent`
 
@@ -1123,7 +1168,8 @@ the same dispatch; nothing here does that.
 
 ### `Multimesh.VisibleInstanceCount` vs `Multimesh.InstanceCount` vs `AliveHogCount`
 
-`InstanceCount` is the total allocated slot count (grows with `SpawnHogs`).
+`InstanceCount` is the MultiMesh's allocated rows, sized by `DrawHogs` to about 1.25× the hogs it
+draws (§5) — not the body capacity, and not the number alive.
 `VisibleInstanceCount` is set each frame to the number of hogs `DrawHogs` uploaded: the live ones
 in the camera's view, often half the crowd or less. Rendering respects `VisibleInstanceCount`. For
 how many hogs are alive, read `AliveHogCount` (the HUD's `TotalHogs.gd` does); it used to be
@@ -1158,7 +1204,7 @@ each frame removed the problem instead of guarding it.
 var workGroups = (uint)Mathf.CeilToInt((float)NumBodies / GPU_THREAD_GROUP_SIZE);
 ```
 `NumBodies` tracks the *current* logical count (grows when hogs are spawned).
-`_bodyCapacity` (and `Multimesh.InstanceCount`) can be larger due to capacity
+`_bodyCapacity` can be larger due to capacity
 doubling. The shaders' bounds checks use `num_bodies` from the push constant, so
 dispatching more groups than needed is harmless but dispatching fewer would leave
 newly-spawned hogs unprocessed.
@@ -1191,7 +1237,7 @@ Before marking any task complete:
 - [ ] If a new per-frame code path was added in C# → no heap allocations
       (verify with Rider's Heap Allocations Viewer or manual audit)
 - [ ] If a new trigger effect key was added → `FindCollisionShapes`,
-      `ConnectVisibilitySignals`, `ScanForTriggers`, and `ProcessTriggerZones`
+      `ConnectVisibilitySignals`, `ScanForTriggers`, and `OnZoneEntered`
       all handle it
 - [ ] If a GDScript resource was mutated at runtime → used `duplicate()` first
 - [ ] If a new GDScript node reads hog state → connected through `Global`

@@ -2,6 +2,7 @@ namespace ExplosionSquadGame.compute_shaders;
 
 using System;
 using System.Collections.Generic;
+using System.Runtime.InteropServices;
 using Godot;
 
 /// <summary>
@@ -76,9 +77,9 @@ public sealed partial class SquadMultiMeshInstance3D
 
   private readonly List<GpuCommand> _gpuCommands = [];
 
-  // Payload pool. Call sites reuse their own staging arrays (_bombBytes,
-  // _projSlotUploadBytes, ...) and overwrite them before the drain runs, so payload bytes
-  // have to be copied out at enqueue time rather than referenced.
+  // Payload pool. Commands refer to byte ranges in it: EnqueueGpuWrite copies a caller's bytes
+  // in at enqueue time (call sites reuse their staging arrays, so the bytes cannot be
+  // referenced), and ReserveGpuWrite hands out a range for the caller to fill in place.
   private byte[] _gpuPayload = new byte[8192];
   private int _gpuPayloadUsed;
 
@@ -93,21 +94,41 @@ public sealed partial class SquadMultiMeshInstance3D
       _ => default,
     };
 
-  /// <summary>Queues a byte-range write into one of the GPU buffers.</summary>
-  private void EnqueueGpuWrite(GpuTarget target, uint offset, ReadOnlySpan<byte> payload)
+  /// <summary>
+  /// Queues a byte-range write into one of the GPU buffers and returns its payload for the
+  /// caller to fill. The span is valid only until the next reservation, which may grow the
+  /// pool, so fill it straight away.
+  ///
+  /// A write that continues the previous command — a write to the same target, at the next
+  /// offset — is merged into it, so a run of spawns or consecutive projectile slots costs one
+  /// <c>BufferUpdate</c>. Only the last command is ever extended, so FIFO order holds.
+  /// </summary>
+  private Span<byte> ReserveGpuWrite(GpuTarget target, uint offset, int size)
   {
-    if (payload.IsEmpty)
-    {
-      return;
-    }
-
-    var needed = _gpuPayloadUsed + payload.Length;
+    var start = _gpuPayloadUsed;
+    var needed = start + size;
     if (needed > _gpuPayload.Length)
     {
       Array.Resize(ref _gpuPayload, Math.Max(needed, _gpuPayload.Length * 2));
     }
 
-    payload.CopyTo(_gpuPayload.AsSpan(_gpuPayloadUsed));
+    _gpuPayloadUsed = needed;
+
+    var commands = CollectionsMarshal.AsSpan(_gpuCommands);
+    if (commands.Length > 0)
+    {
+      ref var last = ref commands[^1];
+      if (
+        last.Kind == GpuCommandKind.Write
+        && last.Target == target
+        && last.Offset + (uint)last.PayloadSize == offset
+        && last.PayloadOffset + last.PayloadSize == start
+      )
+      {
+        last.PayloadSize += size;
+        return _gpuPayload.AsSpan(start, size);
+      }
+    }
 
     _gpuCommands.Add(
       new GpuCommand
@@ -115,12 +136,21 @@ public sealed partial class SquadMultiMeshInstance3D
         Kind = GpuCommandKind.Write,
         Target = target,
         Offset = offset,
-        PayloadOffset = _gpuPayloadUsed,
-        PayloadSize = payload.Length,
+        PayloadOffset = start,
+        PayloadSize = size,
       }
     );
 
-    _gpuPayloadUsed = needed;
+    return _gpuPayload.AsSpan(start, size);
+  }
+
+  /// <summary>Queues a byte-range write into one of the GPU buffers.</summary>
+  private void EnqueueGpuWrite(GpuTarget target, uint offset, ReadOnlySpan<byte> payload)
+  {
+    if (!payload.IsEmpty)
+    {
+      payload.CopyTo(ReserveGpuWrite(target, offset, payload.Length));
+    }
   }
 
   /// <summary>Queues zeroing a byte range of one of the GPU buffers.</summary>
@@ -242,15 +272,8 @@ public sealed partial class SquadMultiMeshInstance3D
 
     FreeGpuRid(ref _transformBuffer);
     _transformBuffer = _rd.StorageBufferCreate((uint)(newCapacity * INSTANCE_STRIDE * sizeof(float)));
-    // MultimeshSetBuffer takes exactly InstanceCount rows, so this grows with the MultiMesh.
-    // A new array, not a resize: DrawHogs rewrites it before it is next uploaded.
-    _transformFloats = new float[newCapacity * DRAW_STRIDE];
 
-    // Resizing the MultiMesh clears it. This runs in a physics tick and _Process follows before
-    // the frame is drawn, so redrawing from the last readback there keeps the crowd on screen.
-    Multimesh.InstanceCount = newCapacity;
-    _hogsDrawDirty = true;
-
+    // The MultiMesh is untouched: DrawHogs sizes it to the hogs it draws, not to capacity.
     RebuildPhysicsUniformSet();
     RebuildHashUniformSet();
     RebuildProjectileUniformSet();
