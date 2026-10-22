@@ -82,10 +82,6 @@ public sealed partial class SquadMultiMeshInstance3D
   private byte[] _gpuPayload = new byte[8192];
   private int _gpuPayloadUsed;
 
-  // BufferUpdate reads only the first sizeBytes of the array handed to it — the existing
-  // bomb upload already relies on that — so one grow-only scratch array serves every size.
-  private byte[] _gpuScratch = new byte[8192];
-
   private Rid ResolveGpuTarget(GpuTarget target) =>
     target switch
     {
@@ -178,19 +174,13 @@ public sealed partial class SquadMultiMeshInstance3D
       switch (cmd.Kind)
       {
         case GpuCommandKind.Write:
-          if (cmd.PayloadSize > _gpuScratch.Length)
-          {
-            Array.Resize(ref _gpuScratch, cmd.PayloadSize);
-          }
-
-          _gpuPayload
-            .AsSpan(cmd.PayloadOffset, cmd.PayloadSize)
-            .CopyTo(_gpuScratch.AsSpan());
+          // The span overload marshals only these bytes. Handing BufferUpdate a whole array
+          // copied all of it into a native array on every call, however few bytes it wrote.
           _ = _rd.BufferUpdate(
             ResolveGpuTarget(cmd.Target),
             cmd.Offset,
             (uint)cmd.PayloadSize,
-            _gpuScratch
+            _gpuPayload.AsSpan(cmd.PayloadOffset, cmd.PayloadSize)
           );
           break;
 
@@ -251,11 +241,10 @@ public sealed partial class SquadMultiMeshInstance3D
     _physicsBuffer = grown;
 
     FreeGpuRid(ref _transformBuffer);
+    _transformBuffer = _rd.StorageBufferCreate((uint)(newCapacity * INSTANCE_STRIDE * sizeof(float)));
     // MultimeshSetBuffer takes exactly InstanceCount rows, so this grows with the MultiMesh.
-    Array.Resize(ref _transformFloats, newCapacity * INSTANCE_STRIDE);
-    _transformBuffer = _rd.StorageBufferCreate(
-      (uint)(_transformFloats.Length * sizeof(float))
-    );
+    // A new array, not a resize: DrawHogs rewrites it before it is next uploaded.
+    _transformFloats = new float[newCapacity * DRAW_STRIDE];
 
     // Resizing the MultiMesh clears it. This runs in a physics tick and _Process follows before
     // the frame is drawn, so redrawing from the last readback there keeps the crowd on screen.

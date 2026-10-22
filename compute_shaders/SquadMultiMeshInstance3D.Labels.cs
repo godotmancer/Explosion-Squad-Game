@@ -63,7 +63,7 @@ public sealed partial class SquadMultiMeshInstance3D
       {
         if (!_nextLabeledSet.Contains(i))
         {
-          _ = HogLabels.Call("release_label", i);
+          _ = HogLabels.Call(_releaseLabelMethod, i);
         }
       }
 
@@ -99,11 +99,11 @@ public sealed partial class SquadMultiMeshInstance3D
     if (forceAssign || (HogBehaviourState)_hogStates[index] != state)
     {
       _hogStates[index] = (byte)state;
-      _ = HogLabels.Call("assign_label", index, (int)state, worldPos);
+      _ = HogLabels.Call(_assignLabelMethod, index, (int)state, worldPos);
     }
     else
     {
-      _ = HogLabels.Call("update_label_position", index, worldPos, true);
+      _ = HogLabels.Call(_updateLabelPositionMethod, index, worldPos, true);
     }
   }
 

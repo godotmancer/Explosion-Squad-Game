@@ -14,4 +14,6 @@ func _on_hog_zone_triggered(
   ) -> void:
   var zone_gate_trigger := zone.get_parent().get_node_or_null("GateTrigger") as GateTrigger
   if zone_gate_trigger:
-    zone_gate_trigger.trigger(hog_index, position, zone, effect)
+    # With the crowd hidden the gate still counts down and closes, without its flash and
+    # announcement.
+    zone_gate_trigger.trigger(hog_index, position, zone, effect, hogs_mesh_instances.ShowHogs)

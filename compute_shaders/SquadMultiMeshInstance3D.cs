@@ -189,7 +189,19 @@ public sealed partial class SquadMultiMeshInstance3D : MultiMeshInstance3D
   public delegate void HogStateChangedEventHandler(int index, int newState, Vector3 worldPos);
 
   private readonly List<BombState> _activeBombs = [];
-  private readonly HashSet<int> _deadHogs = [];
+  // Per body, set once its death has been handled. Indices are never recycled, so a HashSet
+  // here was probed for every corpse on every tick. Sized to _bodyCapacity, grown in SpawnHogs.
+  private bool[] _deadHogs;
+
+  // GDScript method and input action names, converted to StringName once. Passing a string
+  // literal builds a new StringName on every call, and these run per death, per label or per
+  // frame.
+  private static readonly StringName _releaseLabelMethod = "release_label";
+  private static readonly StringName _assignLabelMethod = "assign_label";
+  private static readonly StringName _updateLabelPositionMethod = "update_label_position";
+  private static readonly StringName _playFxMethod = "play_fx";
+  private static readonly StringName _drawExplosionMethod = "draw_explosion";
+  private static readonly StringName _spawnHogsAction = "spawn_hogs";
   private readonly Queue<Vector3> _deathFxQueue = new();
   private readonly Queue<Node3D> _deathFxPool = new();
   private int _deathFxTotalCreated;
@@ -303,6 +315,7 @@ public sealed partial class SquadMultiMeshInstance3D : MultiMeshInstance3D
   private byte[] _projPushBytes;
   private const float PROJ_LIFETIME_GRACE = 0.1f; // extra seconds before reclaiming a slot
 
+  // The MultiMesh upload: the drawn hogs' rows, packed, DRAW_STRIDE floats each.
   private float[] _transformFloats;
   private float _time;
   private Vector2 _targetPos = Vector2.Zero;
@@ -359,6 +372,11 @@ public sealed partial class SquadMultiMeshInstance3D : MultiMeshInstance3D
   }
 
   public const int INSTANCE_STRIDE = 20; // 12 transform + 4 color + 4 custom
+
+  // Floats per MultiMesh row as uploaded: the first 16 of an instance row (transform + color).
+  // The hog shader reads only COLOR, so the MultiMesh is set up without custom data and the
+  // custom row (health, state) stays in the readback for the CPU.
+  public const int DRAW_STRIDE = 16;
 
   // Bitwise state flags — must match STATE_* constants in physics_compute.glsl
   public const uint STATE_IDLE = 1u;
@@ -726,7 +744,7 @@ public sealed partial class SquadMultiMeshInstance3D : MultiMeshInstance3D
 
   public override void _Process(double delta)
   {
-    if (Input.IsActionPressed("spawn_hogs"))
+    if (Input.IsActionPressed(_spawnHogsAction))
     {
       var spawnTarget = MouseGlobalPositionNode.GlobalPosition;
       var forceDir = spawnTarget.DirectionTo(TargetMarker.GlobalPosition).Normalized();
@@ -924,10 +942,15 @@ public sealed partial class SquadMultiMeshInstance3D : MultiMeshInstance3D
       {
         aliveCount++;
       }
-      else if (_deadHogs.Add(i))
+      else if (!_deadHogs[i])
       {
+        _deadHogs[i] = true;
         OnHogDied(i, gpuFloats[src + INST_ORIGIN_X], gpuFloats[src + INST_ORIGIN_Z], stateBits);
-        _ = HogLabels?.Call("release_label", i);
+        // Only a hog holding a label has one to release.
+        if (_labeledSet.Remove(i))
+        {
+          _ = HogLabels?.Call(_releaseLabelMethod, i);
+        }
       }
     }
 
@@ -998,6 +1021,7 @@ public sealed partial class SquadMultiMeshInstance3D : MultiMeshInstance3D
       _bodyCapacity = newCapacity;
       Array.Resize(ref _hogStates, newCapacity);
       Array.Resize(ref _zoneMasks, newCapacity);
+      Array.Resize(ref _deadHogs, newCapacity);
     }
 
     EnqueueGpuWrite(GpuTarget.Physics, writeOffset, newBytes);

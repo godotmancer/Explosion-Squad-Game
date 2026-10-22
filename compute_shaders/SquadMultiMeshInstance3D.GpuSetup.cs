@@ -8,6 +8,11 @@ public sealed partial class SquadMultiMeshInstance3D
 {
   private void SetupMultiMesh()
   {
+    // DrawHogs uploads DRAW_STRIDE floats a hog: transform and colour, no custom data. The
+    // format can only change while the MultiMesh is empty.
+    Multimesh.InstanceCount = 0;
+    Multimesh.UseColors = true;
+    Multimesh.UseCustomData = false;
     Multimesh.InstanceCount = NumBodies;
 
     // The footprint physics keeps out of walls: the drawn mesh's XZ bounds. Falls back to a
@@ -56,6 +61,7 @@ public sealed partial class SquadMultiMeshInstance3D
 
     _hogStates = new byte[_bodyCapacity];
     _zoneMasks = new ulong[_bodyCapacity];
+    _deadHogs = new bool[_bodyCapacity];
 
     for (var i = 0; i < NumBodies; i++)
     {
@@ -130,9 +136,8 @@ public sealed partial class SquadMultiMeshInstance3D
 
     // --- MultiMesh instance buffer — written by physics_compute's tail, so it must exist
     // before the physics uniform set is built (it is binding 5). ---
-    _transformFloats = new float[NumBodies * INSTANCE_STRIDE];
-    var transformSize = (uint)(_transformFloats.Length * sizeof(float));
-    _transformBuffer = _rd.StorageBufferCreate(transformSize);
+    _transformFloats = new float[NumBodies * DRAW_STRIDE];
+    _transformBuffer = _rd.StorageBufferCreate((uint)(NumBodies * INSTANCE_STRIDE * sizeof(float)));
 
     _physicsPipeline = _rd.ComputePipelineCreate(_physicsShader);
     VerifyPipeline(_physicsPipeline, "physics_compute.glsl");

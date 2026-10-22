@@ -99,7 +99,7 @@ public sealed partial class SquadMultiMeshInstance3D
         continue;
       }
 
-      src.Slice(o, INSTANCE_STRIDE).CopyTo(dst.Slice(drawn * INSTANCE_STRIDE, INSTANCE_STRIDE));
+      src.Slice(o, DRAW_STRIDE).CopyTo(dst.Slice(drawn * DRAW_STRIDE, DRAW_STRIDE));
       drawn++;
       minX = Math.Min(minX, x);
       minY = Math.Min(minY, y);
@@ -113,17 +113,19 @@ public sealed partial class SquadMultiMeshInstance3D
     // transforming the mesh bounds by every row of the buffer, the whole capacity, including
     // the stale rows past VisibleInstanceCount. It is also the box Godot culls the MultiMesh by
     // per light and cascade, so a tight one keeps the crowd out of shadow maps it cannot reach.
-    var r = _hogBoundingRadius;
-    var aabb =
-      drawn > 0
-        ? new Aabb(
-          new Vector3(minX - r, minY - r, minZ - r),
-          new Vector3(maxX - minX + 2 * r, maxY - minY + 2 * r, maxZ - minZ + 2 * r)
-        )
-        : new Aabb(Vector3.Zero, new Vector3(r, r, r)); // any non-empty box: nothing is drawn
     var rid = Multimesh.GetRid();
-    RenderingServer.MultimeshSetCustomAabb(rid, aabb);
     Multimesh.VisibleInstanceCount = drawn;
+    if (drawn == 0)
+    {
+      return;
+    }
+
+    var r = _hogBoundingRadius;
+    var aabb = new Aabb(
+      new Vector3(minX - r, minY - r, minZ - r),
+      new Vector3(maxX - minX + 2 * r, maxY - minY + 2 * r, maxZ - minZ + 2 * r)
+    );
+    RenderingServer.MultimeshSetCustomAabb(rid, aabb);
     RenderingServer.MultimeshSetBuffer(rid, _transformFloats);
   }
 

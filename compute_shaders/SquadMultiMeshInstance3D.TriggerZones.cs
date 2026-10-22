@@ -219,7 +219,9 @@ public sealed partial class SquadMultiMeshInstance3D
         break;
     }
 
-    if (ShowHogs && emitSignal)
+    // Not gated on ShowHogs: handlers keep gameplay state (a gate counts its triggers down and
+    // closes), so they must run whether or not the crowd is drawn. They skip their own visuals.
+    if (emitSignal)
     {
       EmitSignal(SignalName.HogZoneTriggered, i, hogPos, zone.Shape, (int)zone.Effect);
     }

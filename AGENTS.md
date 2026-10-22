@@ -245,7 +245,7 @@ mechanism — it preserves the public API and requires no scene-file changes.
 |------|-----------------|
 | `SquadMultiMeshInstance3D.cs` | All `[Export]` properties, all inner types (`GpuBody`, `BombState`, `ProjectileAbility`, enums), all `[Signal]` declarations, all private field declarations, all buffer-layout constants, lifecycle (`_Ready` / `_Process` / `_PhysicsProcess` + `CompleteGpuTick` / `_UnhandledInput`), `SpawnHogs`, `UpdateTargetFromMouse` |
 | `GpuSetup.cs` | `SetupCompute`, `SetupMultiMesh`, `Dispose`, `WriteXxxPush`, `RebuildXxxUniformSet`, `VerifyPipeline`, `SampleHashOverflow` |
-| `GpuQueue.cs` | `GpuTarget` / `GpuCommandKind` enums, `GpuCommand` struct, `_gpuCommands` / `_gpuPayload` / `_gpuScratch`, `EnqueueGpuWrite`, `EnqueueGpuClear`, `EnqueueGrowPhysics`, `EnqueueGrowObstacles`, `FlushGpuCommands`, `ResolveGpuTarget`, `ApplyPhysicsGrowth`, `ApplyObstacleGrowth`, `FreeGpuRid`. **The only file allowed to call `RenderingDevice` mutators.** |
+| `GpuQueue.cs` | `GpuTarget` / `GpuCommandKind` enums, `GpuCommand` struct, `_gpuCommands` / `_gpuPayload`, `EnqueueGpuWrite`, `EnqueueGpuClear`, `EnqueueGrowPhysics`, `EnqueueGrowObstacles`, `FlushGpuCommands`, `ResolveGpuTarget`, `ApplyPhysicsGrowth`, `ApplyObstacleGrowth`, `FreeGpuRid`. **The only file allowed to call `RenderingDevice` mutators.** |
 | `Obstacles.cs` | Obstacle cache, `ExtractObstacles`, `EmitObstacleDataArray/List`, `WriteObstacle`, `ComputeMinObb`, `DecomposeTrimeshFootprint`, `ObstacleSlotCount`, `FindCollisionShapes`, `UpdateObstacleBuffer` |
 | `Projectiles.cs` | `SpawnProjectile`, `UploadPendingProjectiles`, `UpdateProjectileLifetimes`, `RegisterProjectileHitCallback`, `WriteProjectilePush` |
 | `Bombs.cs` | `DrainDeathFxQueue`, `OnDeathFxFinished`, `OnHogDied`, `DropBomb`, `UpdateBombBuffer` |
@@ -360,6 +360,13 @@ drawn and reached the GPU's ground 0.25 m under the visible floor.
 row-major MultiMesh layout. Slots 16–19 are `INSTANCE_CUSTOM` (R/G/B/A). Slot 17
 (`INST_HEALTH`) and slot 18 (`INST_STATE`) are read back every frame by the death loop in
 `CompleteGpuTick`, the trigger zone tests and `DrawHogs`.
+
+The custom row only feeds the CPU: the hog shader reads `COLOR` alone. So the MultiMesh itself
+carries no custom data — `SetupMultiMesh` forces `UseColors = true`, `UseCustomData = false` —
+and `DrawHogs` uploads the first `DRAW_STRIDE = 16` floats of each row (transform + colour),
+20% less than the readback's stride. `_transformFloats` (the upload) is `capacity × DRAW_STRIDE`;
+`_transformBuffer` (the GPU instance buffer) stays `capacity × INSTANCE_STRIDE`. If a hog shader
+ever needs `INSTANCE_CUSTOM`, turn custom data back on and upload all 20.
 
 The shader declares the buffer as `vec4 instances[]` and indexes rows, so the C# float indices
 map as `INST_ROW_CUSTOM = 4` ↔ `INST_CUSTOM_R = 16`. Keep both sides in step: the C# constants
@@ -656,9 +663,15 @@ Global.gd signals:
 
 SquadMultiMeshInstance3D C# signals:
   HogDied(index, position, stateBits)               ← fired in OnHogDied()
-  HogZoneTriggered(hogIndex, position, zone, effect)  ← fired in ProcessTriggerZones()
+  HogZoneTriggered(hogIndex, position, zone, effect)  ← fired in ProcessTriggerZones(), whether or
+                                                        not ShowHogs: GateTrigger counts down on it
   HogStateChanged(index, newState, worldPos)        ← declared, unused (available for GDScript)
 ```
+
+`GateTrigger.trigger` takes a `show_fx` flag (`HogZoneTriggers.gd` passes the squad's
+`ShowHogs`): with the crowd hidden the gate still counts its triggers and closes, but skips its
+flash and `Announce3D`. The signal used to be suppressed outright while hogs were hidden, so
+gates never closed then.
 
 GDScript components connect to C# signals using Godot's `connect()` or `+=` syntax.
 When connecting from GDScript to a C# signal with a deferred connection
@@ -685,6 +698,9 @@ Key mechanisms:
   swapped each frame via tuple assignment — no new dictionary allocated.
 - **Label sets:** two `HashSet<int>` swapped after each full recalculation.
 - **Death FX:** pooled `Queue<Node3D>` capped at `MAX_POOLED_DEATH_FX`.
+- **GDScript calls:** method and action names are `static readonly StringName` fields
+  (`_releaseLabelMethod`, …). A string literal passed to `Call`/`IsActionPressed` builds a new
+  `StringName` every call.
 
 If you introduce a new per-frame code path in `_PhysicsProcess` or any method it
 calls transitively, verify it does not allocate.
@@ -788,13 +804,19 @@ These are non-negotiable. Do not introduce patterns that violate them.
 
 6. **Dead hogs are never removed from the body buffer.** `STATE_DEAD` is the
    authoritative marker. `DrawHogs` skips dead bodies when building the
-   MultiMesh buffer. Body indices are permanent for the lifetime of the scene.
+   MultiMesh buffer. Body indices are permanent for the lifetime of the scene. The death loop
+   remembers which deaths it has handled in `_deadHogs`, a `bool[]` sized to `_bodyCapacity` and
+   grown in `SpawnHogs` — it was a `HashSet<int>`, probed for every corpse on every tick.
 
 6a. **The MultiMesh is uploaded once per rendered frame, by `DrawHogs`, and only with the hogs in
    view.** Do not upload it from the tick again, and do not turn `FrustumCulling` off to make a
    count come out right: `Multimesh.VisibleInstanceCount` is the number drawn, `AliveHogCount` the
    number alive. Keep setting the custom AABB before `MultimeshSetBuffer`, so that Godot does not
    rebuild one from every row of the buffer (0.36 vs 1.13 ms per upload at 100k).
+
+6b. **Every GPU write goes through `BufferUpdate`'s `ReadOnlySpan<byte>` overload**, sliced to the
+   payload. The `byte[]` overload marshals the whole array, so handing it a grow-only scratch
+   array copied kilobytes into a native array for every 4-byte zone-damage write.
 
 7. **MaxVisibleLabels = 50.** Label update is throttled to 10 Hz. Do not make label
    updates per-frame or uncapped.
@@ -865,9 +887,15 @@ than the idle `Sync` suggested, presumably because compute and rendering share t
   100k: 65 fps before, 76 with the per-frame upload and custom AABB but `FrustumCulling` off, 97
   with it on. In a slower session, interleaved: close view 65 → 88 fps, far 77 → 103. `DrawHogs`
   itself costs ~1.0 ms at 100k (0.75 ms with culling off), once per rendered frame, where the
-  compaction and upload it replaced ran once per tick, up to 8 times a frame in catch-up. The
-  next lever is the shadow passes: every shadowed light still draws every hog in view, six times
-  for the target marker's omni light.
+  compaction and upload it replaced ran once per tick, up to 8 times a frame in catch-up.
+
+- **Shadow casters.** Hogs sit on visual layer 4 (`layers = 8`), which the target-marker omni,
+  the teleport spot and the bomb omni leave out of their `shadow_caster_mask`: only the sun's
+  shadow map draws hogs. Projectiles and death-FX particles cast no shadows; the sun uses 2
+  cascades over 60 m (it was 4 over 100); the wall materials dropped subsurface scattering.
+  Measured with 50k hogs started under the target omni, interleaved, 3 pairs: 2.07 vs 2.23 ms a
+  frame, consistent but inside the noise floor. Frames are now cheap enough that shadows no
+  longer dominate this scene the way the 20k table above shows.
 
 - **The cliff is the physics catch-up, not linear cost.** Physics is fixed at 60 Hz; once a tick
   plus the frame's drawing exceeds 16.7 ms, Godot runs extra ticks per frame (up to
@@ -1046,11 +1074,11 @@ when reading optional properties from GDScript objects.
 
 ### Death FX pool cap
 
-`_deathFxTotalCreated` is capped at `MAX_POOLED_DEATH_FX = 30`. When the pool is
-exhausted and the cap is reached, excess death FX are silently dropped (the
-`continue` in `DrainDeathFxQueue`). This is intentional to prevent unbounded node
-creation. Increase the cap or raise `MaxDeathFxPerFrame` if deaths feel visually
-sparse at high kill rates.
+`_deathFxTotalCreated` is capped at `MAX_POOLED_DEATH_FX = 30`. When every pooled effect is
+playing and the cap is reached, `DrainDeathFxQueue` clears the rest of the queue: those deaths
+get no effect rather than a late one at a stale position. This is intentional to prevent
+unbounded node creation. `MaxDeathFxPerFrame` only matters below the pool size; raise
+`MAX_POOLED_DEATH_FX` if deaths feel visually sparse at high kill rates.
 
 ### Frame stamp must advance after Sync, not before
 
@@ -1108,9 +1136,10 @@ calculating buffer sizes or work group counts.
 as a second camera, a SubViewport or a split screen, sees only what the main camera sees; turn
 `FrustumCulling` off for that. Hogs within `FrustumCullMargin` (2 m) plus the mesh's bounding
 radius of the view are kept, so a hog just off-screen still casts its shadow into view. The sun is
-78° up, so hog shadows from it reach ~0.1 m. The shadowed omni and spot lights sit low, though,
-and a hog further off-screen than the margin, between such a light near the screen edge and a
-surface in view, loses its shadow there. Raise the margin if that shows.
+78° up, so hog shadows from it reach ~0.1 m. The sun is the only light hogs cast shadows from
+(§12.1, shadow casters); if a low omni or spot light gets the hog layer back in its caster mask,
+a hog further off-screen than the margin, between that light and a surface in view, loses its
+shadow there. Raise the margin if that shows.
 
 ### Never write `bodies[id] = self` in physics_compute
 

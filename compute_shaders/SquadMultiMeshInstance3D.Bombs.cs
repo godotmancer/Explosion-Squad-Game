@@ -26,11 +26,14 @@ public sealed partial class SquadMultiMeshInstance3D
       }
       else
       {
-        continue;
+        // Every pooled effect is playing and no more may be created: drop the backlog rather
+        // than play it late, at positions seconds old, as effects come back.
+        _deathFxQueue.Clear();
+        break;
       }
 
       fx.GlobalPosition = pos;
-      fx.Call("play_fx");
+      fx.Call(_playFxMethod);
       spawned++;
     }
   }
@@ -90,7 +93,7 @@ public sealed partial class SquadMultiMeshInstance3D
         Damage = damage,
       }
     );
-    _ = (DrawableGround?.CallDeferred("draw_explosion", position));
+    _ = (DrawableGround?.CallDeferred(_drawExplosionMethod, position));
   }
 
   private void UpdateBombBuffer(float fdelta)
