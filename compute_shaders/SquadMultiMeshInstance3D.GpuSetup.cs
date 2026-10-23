@@ -117,6 +117,10 @@ public sealed partial class SquadMultiMeshInstance3D
     // entries: HASH_MAX_PER_CELL body indices per grid bucket, then HASH_AIR_MAX for the
     // airborne bucket
     _hashEntriesBuffer = _rd.StorageBufferCreate(HASH_ENTRIES_BUFFER_SIZE);
+    // fear words: one per grid bucket, zeroed before every build (see _PhysicsProcess)
+    _hashFearBuffer = _rd.StorageBufferCreate(HASH_FEAR_BUFFER_SIZE);
+    // neighbour snapshots: one per body, written by the build for physics to read
+    _neighbourBuffer = _rd.StorageBufferCreate((uint)(_bodyCapacity * NEIGHBOUR_STRIDE));
 
     // --- Spatial hash build shader ---
     var hashFile = GD.Load<RDShaderFile>("res://compute_shaders/spatial_hash_build.glsl");
@@ -133,7 +137,7 @@ public sealed partial class SquadMultiMeshInstance3D
 
     _physicsPipeline = _rd.ComputePipelineCreate(_physicsShader);
     VerifyPipeline(_physicsPipeline, "physics_compute.glsl");
-    RebuildPhysicsUniformSet(); // bindings 0-5: bodies, obstacles, bombs, hash counts, hash entries, instances
+    RebuildPhysicsUniformSet(); // bindings 0-7: bodies, obstacles, bombs, hash counts, hash entries, instances, neighbour snapshots, fear words
 
     // --- Projectile shader + buffer ---
     var projFile = GD.Load<RDShaderFile>("res://compute_shaders/projectile_compute.glsl");
@@ -249,6 +253,8 @@ public sealed partial class SquadMultiMeshInstance3D
         _transformBuffer,
         _hashCountsBuffer,
         _hashEntriesBuffer,
+        _hashFearBuffer,
+        _neighbourBuffer,
         _projBuffer,
         _physicsShader,
         _hashShader,
@@ -308,7 +314,7 @@ public sealed partial class SquadMultiMeshInstance3D
     floats[PHYS_PUSH_FOOTPRINT_MAX_Z] = _hogFootprintMax.Y;
   }
 
-  private void WriteHashBuildPush(int numBodies, float yOffset)
+  private void WriteHashBuildPush(int numBodies, float yOffset, float time, float bombFearDuration)
   {
     var floats = MemoryMarshal.Cast<byte, float>(_hashPushBytes.AsSpan());
     var uints = MemoryMarshal.Cast<byte, uint>(_hashPushBytes.AsSpan());
@@ -316,7 +322,9 @@ public sealed partial class SquadMultiMeshInstance3D
     uints[HASH_PUSH_FRAME_STAMP] = _hashFrameStamp;
     ints[HASH_PUSH_NUM_BODIES] = numBodies;
     floats[HASH_PUSH_Y_OFFSET] = yOffset;
-    floats[3] = 0f; // pad
+    floats[HASH_PUSH_TIME] = time;
+    floats[HASH_PUSH_BOMB_FEAR_DURATION] = bombFearDuration;
+    floats[5] = 0f; // pad
   }
 
   private void RebuildPhysicsUniformSet()
@@ -348,7 +356,12 @@ public sealed partial class SquadMultiMeshInstance3D
     // be a separate transform_compute dispatch.
     var tu = new RDUniform { UniformType = RenderingDevice.UniformType.StorageBuffer, Binding = 5 };
     tu.AddId(_transformBuffer);
-    _physicsUniformSet = _rd.UniformSetCreate([pu, ou, bu, hcu, heu, tu], _physicsShader, 0);
+    // Bindings 6-7: the neighbour snapshots and fear words spatial_hash_build writes this tick.
+    var nu = new RDUniform { UniformType = RenderingDevice.UniformType.StorageBuffer, Binding = 6 };
+    nu.AddId(_neighbourBuffer);
+    var fu = new RDUniform { UniformType = RenderingDevice.UniformType.StorageBuffer, Binding = 7 };
+    fu.AddId(_hashFearBuffer);
+    _physicsUniformSet = _rd.UniformSetCreate([pu, ou, bu, hcu, heu, tu, nu, fu], _physicsShader, 0);
   }
 
   private void RebuildHashUniformSet()
@@ -365,7 +378,12 @@ public sealed partial class SquadMultiMeshInstance3D
     cu.AddId(_hashCountsBuffer);
     var eu = new RDUniform { UniformType = RenderingDevice.UniformType.StorageBuffer, Binding = 2 };
     eu.AddId(_hashEntriesBuffer);
-    _hashUniformSet = _rd.UniformSetCreate([bu, cu, eu], _hashShader, 0);
+    // Neighbour snapshots at binding 3 — also recreated when the bodies grow.
+    var nu = new RDUniform { UniformType = RenderingDevice.UniformType.StorageBuffer, Binding = 3 };
+    nu.AddId(_neighbourBuffer);
+    var fu = new RDUniform { UniformType = RenderingDevice.UniformType.StorageBuffer, Binding = 4 };
+    fu.AddId(_hashFearBuffer);
+    _hashUniformSet = _rd.UniformSetCreate([bu, cu, eu, nu, fu], _hashShader, 0);
   }
 
   private void RebuildProjectileUniformSet()

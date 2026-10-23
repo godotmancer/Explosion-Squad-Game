@@ -3,7 +3,9 @@
 // =============================================================================
 // Inserts alive bodies into a per-bucket hash table read this same frame: grounded
 // ones into the grid (physics_compute and projectile_compute), airborne ones into a
-// separate airborne bucket (projectile_compute only — see HASH_AIR_BUCKET).
+// separate airborne bucket (projectile_compute only — see HASH_AIR_BUCKET). For each
+// grounded body it also writes the neighbour snapshot physics_compute reads, and ranks
+// frightened ones into their bucket's fear word (see struct Neighbour and hash_fear).
 //
 // Dispatch once per frame: ceil(NumBodies / 64) workgroups.
 //
@@ -29,6 +31,8 @@
 //   0 — BodiesBuffer      (readonly)
 //   1 — HashCountsBuffer  (atomic)   uint[TABLE_SIZE + 2]  grid, airborne bucket, overflow
 //   2 — HashEntriesBuffer (write)    uint[TABLE_SIZE * MAX_PER_CELL + AIR_MAX]
+//   3 — NeighbourBuffer   (write)    Neighbour[body capacity] — see struct Neighbour
+//   4 — HashFearBuffer    (atomic)   uint[TABLE_SIZE] — see hash_fear below
 // =============================================================================
 #[compute]
 #version 450
@@ -69,17 +73,44 @@ struct Body {
     float pad29;                 // 29
 };
 
+// What physics_compute reads of a neighbour, written here for every body inserted into the grid.
+// ⚠ KEEP IN SYNC with struct Neighbour in physics_compute.glsl (32 bytes; NEIGHBOUR_STRIDE in C#).
+//
+// The neighbour scan used to load each candidate's whole Body: 120 bytes at a 120-byte stride,
+// so one candidate often straddled two cache lines, and it raced the candidate's own invocation
+// rewriting its fields in the same dispatch (a torn position, new x with old y, was possible).
+// This is 32 bytes, so a line holds whole snapshots, and it is the state at the start of the
+// tick for every candidate alike.
+struct Neighbour {
+    vec2  position;
+    vec2  velocity;
+    float radius;
+    float last_hit_time;
+    uint  bomb_origin_h;  // packHalf2x16(bomb_origin_x, bomb_origin_y): flee direction only, so
+                          // half precision (0.25 m at 300 m out) costs nothing visible
+    uint  drunk_expiry_u; // contagion_expiry_u[CONT_DRUNK]
+};
+
 layout(set = 0, binding = 0, std430) restrict readonly  buffer BodiesBuffer      { Body bodies[]; };
 // Not `coherent`: every cross-invocation access to the counts is an atomic, and atomics are
 // device-coherent regardless of the qualifier. The one plain load (the stamp check in main)
 // is safe even if it returns an older value — see the CAS comment there.
 layout(set = 0, binding = 1, std430) restrict           buffer HashCountsBuffer  { uint hash_counts[]; };
 layout(set = 0, binding = 2, std430) restrict           buffer HashEntriesBuffer { uint hash_entries[]; };
+layout(set = 0, binding = 3, std430) restrict writeonly buffer NeighbourBuffer   { Neighbour neighbours[]; };
+// One word per grid bucket naming its most frightened hog, so physics_compute's outer fear ring
+// can read one word per cell instead of every hog in it: (rank << HASH_FEAR_SLOT_BITS) | slot,
+// where slot is the hog's entry in the bucket and rank orders hogs by last_hit_time, latest
+// highest. atomicMax keeps the latest-hit hog, which is the most afraid: fear falls off with the
+// time since the hit. C# zeroes the buffer before every build (0 = no frightened hog).
+layout(set = 0, binding = 4, std430) restrict           buffer HashFearBuffer    { uint hash_fear[]; };
 
 layout(push_constant, std430) uniform Params {
     uint  frame_stamp;   // physics frame index mod 65536 — see the header
     int   num_bodies;
     float y_offset;
+    float time;
+    float bomb_fear_duration;
     float _pad;
 };
 
@@ -125,6 +156,12 @@ const uint  HASH_AIR_ENTRIES_BASE = HASH_TABLE_SIZE * HASH_MAX_PER_CELL;
 // so it can never collide with a real bucket, and the physics/projectile queries never read
 // it. Sampled from C# behind DebugHashOverflow.
 const uint  HASH_OVERFLOW_SLOT    = HASH_TABLE_SIZE + 1u;
+
+// hash_fear word layout: the hog's slot in its bucket in the low bits, its fear rank above.
+// The rank scale is 2^25, exactly representable as a float, so even a fresh hit's rank fits the
+// 26 bits above the slot (2^26 - 1 would round up to 2^26 and wrap the shift to zero).
+const uint  HASH_FEAR_SLOT_BITS   = 6u;  // log2(HASH_MAX_PER_CELL)
+const float HASH_FEAR_RANK_SCALE  = 33554432.0; // 2^25
 
 // Map 2-D integer cell coords to a bucket — identical in all three shaders. A wrap-around
 // grid rather than a hash: two cells share a bucket only when they are a whole grid apart,
@@ -190,6 +227,21 @@ void main() {
     uint slot = atomicAdd(hash_counts[bucket], 1u) & HASH_COUNT_MASK;
     if (slot < capacity) {
         hash_entries[entries_base + slot] = id;
+        if (bucket != HASH_AIR_BUCKET) {
+            neighbours[id] = Neighbour(b.position, b.velocity, b.radius, b.last_hit_time,
+                                       packHalf2x16(vec2(b.bomb_origin_x, b.bomb_origin_y)),
+                                       b.contagion_expiry_u[2]); // CONT_DRUNK
+
+            // Only a hog still inside its fear window can pass fear on, so only those are
+            // ranked; physics applies the exact (narrower) spread window to the winner. Fear
+            // falls with time since the hit, so the latest hit ranks highest.
+            float since_hit = time - b.last_hit_time;
+            if (b.last_hit_time > 0.0 && since_hit < bomb_fear_duration) {
+                float rank = (1.0 - clamp(since_hit / bomb_fear_duration, 0.0, 1.0))
+                           * HASH_FEAR_RANK_SCALE;
+                atomicMax(hash_fear[bucket], (uint(rank) << HASH_FEAR_SLOT_BITS) | slot);
+            }
+        }
     } else {
         // Overflow is still a graceful no-op — the body is simply invisible as a
         // neighbour this frame — but it is no longer silent. The symptom (hogs walking

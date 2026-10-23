@@ -42,6 +42,7 @@ public sealed partial class SquadMultiMeshInstance3D
     Bombs,
     Projectiles,
     HashCounts,
+    HashFear,
   }
 
   private enum GpuCommandKind : byte
@@ -91,6 +92,7 @@ public sealed partial class SquadMultiMeshInstance3D
       GpuTarget.Bombs => _bombBuffer,
       GpuTarget.Projectiles => _projBuffer,
       GpuTarget.HashCounts => _hashCountsBuffer,
+      GpuTarget.HashFear => _hashFearBuffer,
       _ => default,
     };
 
@@ -272,6 +274,11 @@ public sealed partial class SquadMultiMeshInstance3D
 
     FreeGpuRid(ref _transformBuffer);
     _transformBuffer = _rd.StorageBufferCreate((uint)(newCapacity * INSTANCE_STRIDE * sizeof(float)));
+
+    // Nothing to keep: the hash build rewrites a body's snapshot every tick before physics
+    // reads it.
+    FreeGpuRid(ref _neighbourBuffer);
+    _neighbourBuffer = _rd.StorageBufferCreate((uint)(newCapacity * NEIGHBOUR_STRIDE));
 
     // The MultiMesh is untouched: DrawHogs sizes it to the hogs it draws, not to capacity.
     RebuildPhysicsUniformSet();

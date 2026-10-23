@@ -276,6 +276,15 @@ public sealed partial class SquadMultiMeshInstance3D : MultiMeshInstance3D
   public const uint HASH_ENTRIES_BUFFER_SIZE =
     ((HASH_TABLE_SIZE * HASH_MAX_PER_CELL) + HASH_AIR_MAX) * sizeof(uint);
 
+  // One fear word per grid bucket (hash_fear in spatial_hash_build.glsl), zeroed every tick
+  // before the build.
+  public const uint HASH_FEAR_BUFFER_SIZE = HASH_TABLE_SIZE * sizeof(uint);
+
+  // Bytes per body of the neighbour snapshot the hash build writes for physics_compute's
+  // neighbour scan. ⚠ Must match struct Neighbour in spatial_hash_build.glsl and
+  // physics_compute.glsl (position, velocity, radius, last_hit_time, bomb origin, drunk expiry).
+  public const int NEIGHBOUR_STRIDE = 32;
+
   // Each bucket word is (frame stamp << 16) | entry count, and a word carrying any stamp but
   // this frame's reads as empty — that is what lets the build skip a clear pass. The stamp is
   // the physics frame index masked to 16 bits; see where it advances in _PhysicsProcess.
@@ -299,15 +308,19 @@ public sealed partial class SquadMultiMeshInstance3D : MultiMeshInstance3D
   private Rid _hashUniformSet;
   private Rid _hashCountsBuffer; // HASH_COUNTS_BUFFER_SIZE bytes
   private Rid _hashEntriesBuffer; // HASH_ENTRIES_BUFFER_SIZE bytes
+  private Rid _hashFearBuffer; // HASH_FEAR_BUFFER_SIZE bytes
+  private Rid _neighbourBuffer; // _bodyCapacity × NEIGHBOUR_STRIDE bytes, grown with the bodies
   private byte[] _hashPushBytes;
 
-  // Push constant layout for spatial_hash_build.glsl (4 × float/uint = 16 bytes)
+  // Push constant layout for spatial_hash_build.glsl (6 × float/uint = 24 bytes)
   private const int HASH_PUSH_FRAME_STAMP = 0; // uint  frame_stamp (see HASH_STAMP_MASK)
   private const int HASH_PUSH_NUM_BODIES = 1; // int   num_bodies
   private const int HASH_PUSH_Y_OFFSET = 2; // float y_offset
+  private const int HASH_PUSH_TIME = 3; // float time
+  private const int HASH_PUSH_BOMB_FEAR_DURATION = 4; // float bomb_fear_duration
 
-  // slot 3 is padding
-  private const int HASH_BUILD_PUSH_SIZE = 4 * sizeof(float);
+  // slot 5 is padding
+  private const int HASH_BUILD_PUSH_SIZE = 6 * sizeof(float);
 
   private uint _hashFrameStamp; // physics frame index & HASH_STAMP_MASK
   private int _projReadbackCounter; // throttle: only read projectile buffer every N frames
@@ -854,7 +867,10 @@ public sealed partial class SquadMultiMeshInstance3D : MultiMeshInstance3D
     // for storage-buffer writes), physics silently treats those stale buckets as
     // empty rather than reading garbage body indices.
     // -------------------------------------------------------------------------
-    WriteHashBuildPush(NumBodies, YOffset);
+    WriteHashBuildPush(NumBodies, YOffset, _time, BombFearDuration);
+    // The build ranks frightened hogs into each bucket's fear word with atomicMax, so the words
+    // start every tick at zero (no frightened hog). 128 KB.
+    EnqueueGpuClear(GpuTarget.HashFear, 0, HASH_FEAR_BUFFER_SIZE);
     WriteProjectilePush(fdelta, _time);
 
     // Apply every queued buffer mutation. This is the ONE place GPU buffers are written,

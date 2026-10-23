@@ -397,6 +397,8 @@ are float offsets, the GLSL constants are vec4 offsets.
 | `HASH_OVERFLOW_SLOT` | `HASH_TABLE_SIZE + 1` | Overflow counter after both; cannot collide with a real bucket |
 | `HASH_COUNTS_BUFFER_SIZE` | `(HASH_TABLE_SIZE + 2) * 4` | Grid words, airborne word, overflow counter |
 | `HASH_ENTRIES_BUFFER_SIZE` | `(HASH_TABLE_SIZE * 64 + HASH_AIR_MAX) * 4` | Grid entries, then the airborne list |
+| `HASH_FEAR_BUFFER_SIZE` | `HASH_TABLE_SIZE * 4` | One fear word per grid bucket, zeroed every tick (below) |
+| `NEIGHBOUR_STRIDE` | 32 | Bytes per body of the neighbour snapshot (below); buffer grows with the bodies |
 
 **Airborne bodies are not in the grid.** Physics never pairs a grounded hog with an airborne one
 (its neighbour scan skips them), so they would only cost it candidates and eat into per-cell
@@ -428,11 +430,40 @@ is **counted**, not silent: `atomicAdd(hash_counts[HASH_OVERFLOW_SLOT], 1u)`. Se
 `HASH_MAX_PER_CELL` or shrink `HASH_CELL_SIZE`. The symptom otherwise — hogs walking through
 each other in a dense pile — is very hard to attribute.
 
+### Neighbour snapshots and fear words
+
+The hash build writes two more things for every body it puts in the grid, and physics reads
+them instead of other bodies:
+
+- **`struct Neighbour`** (32 bytes, binding 3 of the build, 6 of physics, one per body): position,
+  velocity, radius, `last_hit_time`, the bomb origin packed as two halves, and the drunk expiry
+  — every field of another hog the neighbour scan reads. The scan used to load each
+  candidate's `Body` (120 bytes, so often two cache lines) while that candidate's own invocation
+  was rewriting it in the same dispatch, so a position could be read torn. The snapshot is the
+  start-of-tick state of every candidate alike, and a line holds whole snapshots. It is
+  duplicated in the two shaders (`⚠ KEEP IN SYNC`) and sized by `NEIGHBOUR_STRIDE` in C#. Contagion
+  spread still writes `bodies[i]` through `infect()`'s atomics.
+- **`hash_fear`** (one word per grid bucket, binding 4 of the build, 7 of physics): the bucket's
+  most frightened hog, as `(rank << 6) | slot`, kept by `atomicMax`. Only hogs inside their fear
+  window (`time - last_hit_time < bomb_fear_duration`, from the build's push constants) are
+  ranked, latest hit highest. C# zeroes the words every tick (`EnqueueGpuClear(GpuTarget.HashFear)`
+  before the flush), so a non-zero word is this tick's.
+
+The 5×5 scan's outer ring exists only for fear contagion, and it now reads one fear word per
+cell — plus at most one snapshot — instead of every hog in the 16 cells. That is the hog the
+full scan would have picked: fear falls off with time since the hit, so the latest-hit hog is
+the most afraid, and the spread window that rejects it rejects the whole cell. A throwaway
+check that ran both side by side found 0 mismatches in 68.7M outer-cell evaluations with
+fear present. The inner 3×3 still visits every hog.
+
+Physics went from ~4.5 to ~2.7 ms a tick at 100k hogs (GPU timestamps; figures and method in
+§12.1).
+
 ### Push Constant Sizes
 
 | Shader | Size | Constant |
 |--------|------|----------|
-| `spatial_hash_build.glsl` | 16 bytes (4 × float) | `HASH_BUILD_PUSH_SIZE` |
+| `spatial_hash_build.glsl` | 24 bytes (6 × float) | `HASH_BUILD_PUSH_SIZE` |
 | `projectile_compute.glsl` | 32 bytes (8 × float) | `PROJ_PUSH_SIZE` |
 | `physics_compute.glsl` | 72 bytes (18 × float) | `PHYSICS_PUSH_SIZE` |
 | `compositor_fx/Outline.glsl` | 72 bytes (mat4 64B + vec2 8B) | hardcoded in `Outline.gd` |
@@ -791,10 +822,13 @@ There are **three** uniform sets — `_physicsUniformSet`, `_hashUniformSet`,
 `_projUniformSet` — since the transform set went away with its shader. All three reference
 `_physicsBuffer`, so a body buffer reallocation must rebuild all three.
 
-`_physicsUniformSet` spans bindings 0–5: bodies, obstacles, bombs, hash counts, hash entries,
-instances. Binding 5 (the instance buffer) means `_transformBuffer` must exist *before*
-`RebuildPhysicsUniformSet()` is called — check the ordering in `SetupCompute` if you move
-buffer creation around.
+`_physicsUniformSet` spans bindings 0–7: bodies, obstacles, bombs, hash counts, hash entries,
+instances, neighbour snapshots, fear words; `_hashUniformSet` 0–4: bodies, hash counts, hash
+entries, neighbour snapshots, fear words. Binding 5 (the instance buffer) means
+`_transformBuffer` must exist *before* `RebuildPhysicsUniformSet()` is called, and likewise
+`_neighbourBuffer` / `_hashFearBuffer` before both sets — check the ordering in `SetupCompute`
+if you move buffer creation around. `ApplyPhysicsGrowth` recreates `_neighbourBuffer` with the
+bodies (nothing to copy: the build rewrites every snapshot it hands out each tick).
 
 Free uniform sets **before** the buffers they reference, not after. `ApplyPhysicsGrowth` was
 leaking four sets per growth event until this was fixed.
@@ -940,6 +974,24 @@ than the idle `Sync` suggested, presumably because compute and rendering share t
   120 Hz by driver vsync); the MultiMesh upload now follows the drawn count, e.g. 1.3k rows
   instead of the 30k capacity after a bomb.
 
+- **Neighbour snapshots and fear words (§7).** GPU timestamps around each pass, 100k hogs
+  scattered over 60 × 120 m and gathering on the target, a fear bomb every 0.5 s from t = 10 s,
+  3 interleaved pairs:
+
+  | per tick | before | after |
+  |---|---|---|
+  | physics, calm (t 3–9 s) | 4.43–4.74 ms | 2.62–2.67 ms |
+  | physics, bombs (t 11–18 s) | 4.20–4.40 ms | 2.89–2.95 ms |
+  | hash build, calm / bombs | 46–48 / 50–53 µs | 82–87 / 132–148 µs |
+
+  Forcing the old scan to 3×3 or 5×5 for every hog measured 3.26 vs 5.24 ms: the outer ring was
+  ~2 ms whenever it ran. The build pays for the snapshot writes and the fear atomics. The same
+  runs ended with 88.0–88.3k hogs alive against 88.6–88.9k before (deaths come from the damage
+  zones the crowd is pushed into): reading every neighbour's start-of-tick state, instead of
+  whichever side of its own update the racy read caught, shifts the crowd slightly.
+  Measure GPU passes this way, not by frame time: a one-point spawn (`SpawnPoint` set, as in
+  `Main.tscn`) puts 100k hogs in one cell, overflows it, and times nothing but atomic contention.
+
 - **The cliff is the physics catch-up, not linear cost.** Physics is fixed at 60 Hz; once a tick
   plus the frame's drawing exceeds 16.7 ms, Godot runs extra ticks per frame (up to
   `max_physics_steps_per_frame`, 8), and every tick here is a full dispatch + `Sync`. Before the
@@ -975,6 +1027,9 @@ than the idle `Sync` suggested, presumably because compute and rendering share t
 3. Add the matching field at the same offset to `struct Body` in **all three** shaders —
    `physics_compute.glsl`, `spatial_hash_build.glsl`, `projectile_compute.glsl`. Missing one
    silently corrupts the stride for that shader only, which is a miserable bug to find.
+   If physics' neighbour scan needs to read it from *other* hogs, add it to `struct Neighbour`
+   in the build and physics shaders instead of reading `bodies[i]`, and update
+   `NEIGHBOUR_STRIDE` (a multiple of 8: std430 aligns the struct's `vec2` members to 8) (§7).
 4. Initialize the field in both `SetupCompute` (initial bodies) and
    `SpawnHogs` (runtime spawns).
 5. If physics writes the field, add it to the explicit field-write block at the end of
@@ -1157,12 +1212,10 @@ next one syncs it. Consequences for new code:
 ### Do not mark the body buffer `coherent`
 
 None of the three shaders declares a `coherent` buffer, deliberately. Atomics are device-scope
-with or without the qualifier (the SPIR-V atomics are identical either way), and every plain
-read of *another* body already tolerates seeing it from either side of that body's own update
-this frame — the tint comment in physics_compute's tail documents that one-frame lag. The
+with or without the qualifier (the SPIR-V atomics are identical either way), and no invocation
+reads another body's plain fields: the neighbour scan reads the build's snapshots (§7). The
 qualifier only costs: Godot's Metal backend (SPIRV-Cross) turns it into `coherent device` at
-MSL 3.2+ and `volatile device` below that, so neighbour loads skip the cache and the
-`Body n = bodies[i]` snapshot cannot be trimmed to the fields actually used. `coherent` (plus a
+MSL 3.2+ and `volatile device` below that, so loads skip the cache. `coherent` (plus a
 `memoryBarrier`) is only for an invocation that must *observe* another's plain write within
 the same dispatch; nothing here does that.
 
@@ -1222,7 +1275,8 @@ Before marking any task complete:
 - [ ] If any `PROJ_*`, `PHYS_*`, `INST_*`, `BOMB_*`, `OBS_*`, or `HASH_*`
       constants changed → matching update in the corresponding `.glsl` file
 - [ ] If `GpuBody` struct fields changed → `BODY_STRIDE` updated **and all three** GLSL
-      `struct Body` copies updated to match (§7)
+      `struct Body` copies updated to match (§7), and `struct Neighbour` (build + physics)
+      matches `NEIGHBOUR_STRIDE` if a neighbour field changed
 - [ ] If a GPU buffer write was added → it goes through `EnqueueGpuWrite`, not a direct
       `_rd.BufferUpdate` (§5)
 - [ ] If contagion logic changed → every infection goes through `infect()` (both copies
