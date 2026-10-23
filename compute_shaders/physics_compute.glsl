@@ -68,11 +68,23 @@ struct Bomb {
     float _pad3;
 };
 
-// Deliberately NOT `coherent`. Atomics are device-scope with or without it, and every plain
-// read of another body (the neighbour scan) already accepts that body's value from either
-// side of its own update this frame. What the qualifier did cost: on Metal it becomes
-// `coherent device` (MSL 3.2+) or `volatile device` (older), so every neighbour load skips
-// the cache and cannot be trimmed to the fields actually used. See AGENTS.md §14.
+// A neighbour as the hash build saw it at the start of this tick, written by
+// spatial_hash_build.glsl for every body it put in the grid.
+// ⚠ KEEP IN SYNC with struct Neighbour in spatial_hash_build.glsl (32 bytes; NEIGHBOUR_STRIDE in C#).
+struct Neighbour {
+    vec2  position;
+    vec2  velocity;
+    float radius;
+    float last_hit_time;
+    uint  bomb_origin_h;  // packHalf2x16(bomb_origin_x, bomb_origin_y)
+    uint  drunk_expiry_u; // contagion_expiry_u[CONT_DRUNK]
+};
+
+// Deliberately NOT `coherent`. Atomics are device-scope with or without it, and no invocation
+// reads another body's plain fields: the neighbour scan reads the snapshots the hash build
+// wrote (NeighbourBuffer below). What the qualifier did cost: on Metal it becomes
+// `coherent device` (MSL 3.2+) or `volatile device` (older), so every load skips the cache.
+// See AGENTS.md §14.
 layout(set = 0, binding = 0, std430) restrict buffer          BodiesBuffer    { Body     bodies[];    };
 layout(set = 0, binding = 1, std430) restrict readonly buffer ObstaclesBuffer { Obstacle obstacles[]; };
 layout(set = 0, binding = 2, std430) restrict readonly buffer BombsBuffer     { Bomb     bombs[];     };
@@ -85,6 +97,10 @@ layout(set = 0, binding = 4, std430) restrict readonly buffer HashEntriesBuffer 
 // coalesced 16-byte stores instead of 20 scalar ones (20 floats == 80 bytes == 5 * vec4,
 // so every instance stays 16-byte aligned).
 layout(set = 0, binding = 5, std430) restrict writeonly buffer InstanceBuffer { vec4 instances[]; };
+// Neighbour snapshots, per body, and each grid bucket's most frightened hog, both written by
+// spatial_hash_build.glsl this tick (see struct Neighbour and hash_fear there).
+layout(set = 0, binding = 6, std430) restrict readonly buffer NeighbourBuffer { Neighbour neighbours[]; };
+layout(set = 0, binding = 7, std430) restrict readonly buffer HashFearBuffer  { uint hash_fear[]; };
 
 layout(push_constant, std430) uniform Params {
     float delta_time;
@@ -407,6 +423,8 @@ const float HASH_CELL_SIZE    = 2.0;  // world units per cell edge — kept smal
 // Bucket word layout: frame stamp in the high 16 bits, entry count in the low 16.
 const uint  HASH_STAMP_SHIFT  = 16u;
 const uint  HASH_COUNT_MASK   = 0xFFFFu;
+// hash_fear word layout (spatial_hash_build.glsl): the hog's slot in its bucket in the low bits.
+const uint  HASH_FEAR_SLOT_MASK = HASH_MAX_PER_CELL - 1u;
 
 // Map 2-D integer cell coords to a bucket — identical in all three shaders. A wrap-around
 // grid rather than a hash: two cells share a bucket only when they are a whole grid apart
@@ -511,6 +529,20 @@ void try_spread_contagion(int i, uint t, uint new_expiry, uint self_dps,
                           float prob, uint rnd_seed, uint now_u) {
     if (hash(rnd_seed) >= prob) return;
     infect(i, t, new_expiry, self_dps, now_u);
+}
+
+// Fear relayed by neighbour n: a hog hit by a bomb panics the hogs around it while it is still
+// early in its own fear window. Keeps the strongest such fear seen and the origin to flee from.
+void consider_fear_from(Neighbour n, inout float best_fear, inout vec2 best_origin) {
+    float n_time = time - n.last_hit_time;
+    if (n.last_hit_time > 0.0 && n_time >= 0.0
+        && n_time < bomb_fear_duration * FEAR_CONTAGION_WINDOW) {
+        float n_fear = 1.0 - (n_time / bomb_fear_duration);
+        if (n_fear > best_fear) {
+            best_fear   = n_fear;
+            best_origin = unpackHalf2x16(n.bomb_origin_h);
+        }
+    }
 }
 
 // =============================================================================
@@ -720,7 +752,8 @@ void main() {
         //     contagion only.  FEAR_CONTAGION_RADIUS (20) is an upper bound,
         //     not the effective range: per-frame spread is limited by this scan,
         //     and fear travels farther by relaying through intermediate hogs
-        //     over several frames.
+        //     over several frames. An outer cell costs one word, not its hogs:
+        //     see the outer-ring branch below.
         //
         // The table is a wrap-around grid (see spatial_hash), so no two cells in
         // this window share a bucket. Cells a whole grid apart (512 m / 256 m) do,
@@ -745,10 +778,29 @@ void main() {
         for (int dcz = -ring; dcz <= ring; dcz++) {
             for (int dcx = -ring; dcx <= ring; dcx++) {
 
-                bool inner = (abs(dcx) <= 1 && abs(dcz) <= 1);
+                uint bucket = spatial_hash(self_cx + dcx, self_cz + dcz);
 
-                uint bucket      = spatial_hash(self_cx + dcx, self_cz + dcz);
-                uint stored      = hash_counts[bucket];
+                // ---- Outer ring: fear contagion from the cell's most frightened hog ----
+                // The bucket's fear word names it (spatial_hash_build.glsl), so the cell
+                // costs one word and at most one snapshot instead of every hog in it. It is
+                // the hog a full scan would pick: fear falls off with time since the hit, so
+                // the latest-hit hog is the most afraid, and if the spread window rejects it,
+                // it rejects the rest of the cell too. The word is zeroed before every build,
+                // so a non-zero one is this tick's. No distance test is needed: the 5×5 window
+                // reaches ~8.5 m, inside FEAR_CONTAGION_RADIUS, and an outer cell is at least
+                // a cell away, never the NEAR_ZERO overlap the inner loop skips.
+                if (abs(dcx) > 1 || abs(dcz) > 1) {
+                    uint fear_word = hash_fear[bucket];
+                    if (fear_word != 0u) {
+                        int i = int(hash_entries[bucket * HASH_MAX_PER_CELL
+                                                 + (fear_word & HASH_FEAR_SLOT_MASK)]);
+                        consider_fear_from(neighbours[i], best_contagion_fear, contagion_bomb_origin);
+                    }
+                    continue;
+                }
+
+                // ---- Inner 3×3: every hog in the cell ----
+                uint stored = hash_counts[bucket];
                 // Skip buckets not written this frame (stamp mismatch) — that is how
                 // the build invalidates old contents without a clear pass.
                 if ((stored >> HASH_STAMP_SHIFT) != frame_stamp) continue;
@@ -758,108 +810,91 @@ void main() {
                     int i = int(hash_entries[bucket * HASH_MAX_PER_CELL + k]);
                     if (i == int(id)) continue;
 
-                    // Snapshot once. BodiesBuffer is not `coherent`, so these are
-                    // ordinary cacheable loads and the compiler is free to fetch only
-                    // the fields used below. The atomics in try_spread_contagion run
-                    // after this load, so a register copy is correct.
-                    Body n = bodies[i];
-
-                    // Re-check aliveness here: a body could have died between
-                    // the hash build pass and this pass (same frame, same Sync).
-                    if (n.health <= 0.0 || n.height > y_offset + GROUND_EPSILON) continue;
+                    // The candidate as the hash build saw it at the start of this tick, when
+                    // it was alive and grounded (only those are in the grid). Not bodies[i]:
+                    // that raced the candidate's own invocation rewriting it this dispatch,
+                    // and loaded 120-byte structs for a few fields (see struct Neighbour).
+                    Neighbour n = neighbours[i];
 
                     vec2  diff  = self.position - n.position;
                     float dist2 = dot(diff, diff);
                     if (dist2 < NEAR_ZERO * NEAR_ZERO) continue;
 
-                    // ---- Fear contagion: both inner and outer rings (up to 20u) ----
-                    // Outer ring never needs `dist` — squared compare only.
+                    // ---- Fear contagion: a frightened neighbour relays its panic ----
+                    // Every inner candidate is well within FEAR_CONTAGION_RADIUS.
+                    if (can_gain_fear) {
+                        consider_fear_from(n, best_contagion_fear, contagion_bomb_origin);
+                    }
+
+                    // Boid forces and overlap. One inversesqrt for the unit vector and `dist`.
+                    float inv_dist = inversesqrt(dist2);
+                    float dist     = dist2 * inv_dist;
+                    closest_neighbor_dist = min(closest_neighbor_dist, dist);
+
+                    float comb_radius = self.radius + n.radius;
+
+                    // ---- Separation: quadratic repulsion within personal-space bubble ----
+                    float sep_radius = comb_radius * SEPARATION_PADDING;
+                    if (dist2 < sep_radius * sep_radius) {
+                        float norm_dist = dist / sep_radius;
+                        separation += diff * inv_dist * (1.0 - norm_dist) * (1.0 - norm_dist);
+                        sep_count++;
+                    }
+
+                    // ---- Alignment: match heading of nearby neighbors ----
+                    if (dist2 < ALIGNMENT_RADIUS * ALIGNMENT_RADIUS) {
+                        avg_velocity += n.velocity;
+                        align_count++;
+                    }
+
+                    // ---- Cohesion: steer toward local crowd center ----
+                    if (dist2 < COHESION_RADIUS * COHESION_RADIUS) {
+                        avg_position += n.position;
+                        cohesion_count++;
+                    }
+
+                    // ---- Hard overlap correction: resolve actual body interpenetration ----
+                    if (dist2 < comb_radius * comb_radius) {
+                        overlap_correction += diff * inv_dist * (comb_radius - dist) * OVERLAP_CORRECTION_FACTOR;
+                    }
+
+                    // ---- Drunk fear: a staggering hog unsettles the hogs right next to it ----
+                    // Pull-based, exactly like the bomb fear above: the frightened hog reads
+                    // the drunk one, so this needs no atomics and re-evaluates every frame the
+                    // two stay close. Inner ring only — DRUNK_FEAR_RADIUS sits inside the 3×3's
+                    // guaranteed coverage, so it does not depend on `ring`.
                     if (can_gain_fear
-                        && dist2 < FEAR_CONTAGION_RADIUS * FEAR_CONTAGION_RADIUS) {
-                        float n_time = time - n.last_hit_time;
-                        // Only spread from neighbors still actively afraid (within early window)
-                        if (n.last_hit_time > 0.0 && n_time >= 0.0
-                            && n_time < bomb_fear_duration * FEAR_CONTAGION_WINDOW) {
-                            float n_fear = 1.0 - (n_time / bomb_fear_duration);
-                            if (n_fear > best_contagion_fear) {
-                                best_contagion_fear   = n_fear;
-                                contagion_bomb_origin = vec2(n.bomb_origin_x, n.bomb_origin_y);
-                            }
+                        && dist2 < DRUNK_FEAR_RADIUS * DRUNK_FEAR_RADIUS
+                        && n.drunk_expiry_u > now_u) {
+                        float n_remaining = float(n.drunk_expiry_u - now_u) / CONT_TIME_SCALE;
+                        // Falls off with both the neighbour's remaining drunkenness and the
+                        // gap between us — the second factor keeps the effect from having a
+                        // hard edge at DRUNK_FEAR_RADIUS.
+                        float n_fear = DRUNK_FEAR_STRENGTH
+                                     * clamp(n_remaining / DRUNK_FEAR_FADE, 0.0, 1.0)
+                                     * (1.0 - dist / DRUNK_FEAR_RADIUS);
+                        if (n_fear > best_contagion_fear) {
+                            best_contagion_fear = n_fear;
+                            // Flee the drunk hog itself rather than any bomb: this is the
+                            // origin the panic steers away from, and it is re-read every
+                            // frame, so hogs keep backing away as the drunk one staggers.
+                            contagion_bomb_origin = n.position;
                         }
                     }
 
-                    // Inner 3×3 only: boid forces and overlap (all within CELL_SIZE = 10u)
-                    if (inner) {
-                        // One inversesqrt for the unit vector and `dist`. Outer-ring
-                        // candidates never enter here, so they never pay a sqrt.
-                        float inv_dist = inversesqrt(dist2);
-                        float dist     = dist2 * inv_dist;
-                        closest_neighbor_dist = min(closest_neighbor_dist, dist);
-
-                        float comb_radius = self.radius + n.radius;
-
-                        // ---- Separation: quadratic repulsion within personal-space bubble ----
-                        float sep_radius = comb_radius * SEPARATION_PADDING;
-                        if (dist2 < sep_radius * sep_radius) {
-                            float norm_dist = dist / sep_radius;
-                            separation += diff * inv_dist * (1.0 - norm_dist) * (1.0 - norm_dist);
-                            sep_count++;
-                        }
-
-                        // ---- Alignment: match heading of nearby neighbors ----
-                        if (dist2 < ALIGNMENT_RADIUS * ALIGNMENT_RADIUS) {
-                            avg_velocity += n.velocity;
-                            align_count++;
-                        }
-
-                        // ---- Cohesion: steer toward local crowd center ----
-                        if (dist2 < COHESION_RADIUS * COHESION_RADIUS) {
-                            avg_position += n.position;
-                            cohesion_count++;
-                        }
-
-                        // ---- Hard overlap correction: resolve actual body interpenetration ----
-                        if (dist2 < comb_radius * comb_radius) {
-                            overlap_correction += diff * inv_dist * (comb_radius - dist) * OVERLAP_CORRECTION_FACTOR;
-                        }
-
-                        // ---- Drunk fear: a staggering hog unsettles the hogs right next to it ----
-                        // Pull-based, exactly like the bomb fear above: the frightened hog reads
-                        // the drunk one, so this needs no atomics and re-evaluates every frame the
-                        // two stay close. Inner ring only — DRUNK_FEAR_RADIUS sits inside the 3×3's
-                        // guaranteed coverage, so it does not depend on `ring`.
-                        if (can_gain_fear
-                            && dist2 < DRUNK_FEAR_RADIUS * DRUNK_FEAR_RADIUS
-                            && n.contagion_expiry_u[CONT_DRUNK] > now_u) {
-                            float n_remaining = float(n.contagion_expiry_u[CONT_DRUNK] - now_u) / CONT_TIME_SCALE;
-                            // Falls off with both the neighbour's remaining drunkenness and the
-                            // gap between us — the second factor keeps the effect from having a
-                            // hard edge at DRUNK_FEAR_RADIUS.
-                            float n_fear = DRUNK_FEAR_STRENGTH
-                                         * clamp(n_remaining / DRUNK_FEAR_FADE, 0.0, 1.0)
-                                         * (1.0 - dist / DRUNK_FEAR_RADIUS);
-                            if (n_fear > best_contagion_fear) {
-                                best_contagion_fear = n_fear;
-                                // Flee the drunk hog itself rather than any bomb: this is the
-                                // origin the panic steers away from, and it is re-read every
-                                // frame, so hogs keep backing away as the drunk one staggers.
-                                contagion_bomb_origin = n.position;
-                            }
-                        }
-
-                        // ---- Contagion spread: fire and poison propagate to nearby bodies ----
-                        // Per-frame random seed mixes id, neighbour index and time so no
-                        // two pairs (and no two frames) roll the same probability.
-                        if (spreads_fire && dist2 < FIRE_SPREAD_RADIUS * FIRE_SPREAD_RADIUS) {
-                            try_spread_contagion(i, CONT_FIRE, fire_child_expiry,
-                                self.contagion_dps_u[CONT_FIRE], FIRE_SPREAD_PROB,
-                                id * 31u + uint(i) + uint(time * 100.0 + 0.5), now_u);
-                        }
-                        if (spreads_poison && dist2 < POISON_SPREAD_RADIUS * POISON_SPREAD_RADIUS) {
-                            try_spread_contagion(i, CONT_POISON, poison_child_expiry,
-                                self.contagion_dps_u[CONT_POISON], POISON_SPREAD_PROB,
-                                id * 47u + uint(i) * 3u + uint(time * 100.0 + 1.5), now_u);
-                        }
+                    // ---- Contagion spread: fire and poison propagate to nearby bodies ----
+                    // Per-frame random seed mixes id, neighbour index and time so no
+                    // two pairs (and no two frames) roll the same probability. The spread
+                    // itself goes through atomics on bodies[i], not the snapshot.
+                    if (spreads_fire && dist2 < FIRE_SPREAD_RADIUS * FIRE_SPREAD_RADIUS) {
+                        try_spread_contagion(i, CONT_FIRE, fire_child_expiry,
+                            self.contagion_dps_u[CONT_FIRE], FIRE_SPREAD_PROB,
+                            id * 31u + uint(i) + uint(time * 100.0 + 0.5), now_u);
+                    }
+                    if (spreads_poison && dist2 < POISON_SPREAD_RADIUS * POISON_SPREAD_RADIUS) {
+                        try_spread_contagion(i, CONT_POISON, poison_child_expiry,
+                            self.contagion_dps_u[CONT_POISON], POISON_SPREAD_PROB,
+                            id * 47u + uint(i) * 3u + uint(time * 100.0 + 1.5), now_u);
                     }
                 }
             }

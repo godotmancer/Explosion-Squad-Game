@@ -24,9 +24,14 @@ var world_size_from_mesh: Vector2
 # -> Array[ImageTexture] of rotated variants
 var _baked: Dictionary = {}
 
-# Pending blits dequeued at explosions_per_frame rate in _process.
-# Each entry: [Vector3 world_pos, ImageTexture tex]
-var _blit_queue: Array = []
+# Pending blits, drained at explosions_per_frame in _process. A fixed ring: a bomb killing
+# thousands queues positions without an Array per entry, and popping is O(1). When it is full
+# the oldest blit is dropped.
+const _QUEUE_CAPACITY := 4096
+var _queue_pos := PackedVector3Array()
+var _queue_tex: Array[Texture2D] = []
+var _queue_head := 0
+var _queue_count := 0
 
 # Tint colour (r,g,b) baked into the pixel data; alpha is midpoint of the
 # original randf_range so variance is gone but perf is recovered.
@@ -44,10 +49,12 @@ func _ready() -> void:
   albedo_texture.setup(size.x, size.y, DrawableTexture2D.DRAWABLE_FORMAT_RGBA8_SRGB, color, false)
   var quad := mesh_instance_3d.mesh as QuadMesh
   world_size_from_mesh = quad.size
+  _queue_pos.resize(_QUEUE_CAPACITY)
+  _queue_tex.resize(_QUEUE_CAPACITY)
 
   Global.projectile_impact.connect(_on_projectile_hit_ground, CONNECT_DEFERRED)
   if hogs_mesh_instances:
-    hogs_mesh_instances.connect("HogDied", _on_hog_died)
+    hogs_mesh_instances.connect("HogsDied", _on_hogs_died)
 
   _prebake_all_textures()
 
@@ -130,38 +137,53 @@ func _rotate_and_tint(src: Image, angle: float, tint: Color, image_scale: float)
 
 func _process(_delta: float) -> void:
   var count := 0
-  while _blit_queue.size() > 0 and count < explosions_per_frame:
-    var entry = _blit_queue.pop_front()
-    _blit_texture(entry[0], entry[1])
+  while _queue_count > 0 and count < explosions_per_frame:
+    _blit_texture(_queue_pos[_queue_head], _queue_tex[_queue_head])
+    _queue_tex[_queue_head] = null
+    _queue_head = (_queue_head + 1) % _QUEUE_CAPACITY
+    _queue_count -= 1
     count += 1
 
 
-func _on_hog_died(_index: int, pos: Vector3, stateBits: int) -> void:
-  var key: String
-  if Global.is_in_state(stateBits, Global.HOG_STATE_ON_FIRE):
-    key = "fire"
-  elif Global.is_in_state(stateBits, Global.HOG_STATE_POISONED):
-    key = "poison"
-  elif Global.is_in_state(stateBits, Global.HOG_STATE_DRUNK):
-    key = "drunk"
-  else:
-    key = "default"
+func _enqueue_blit(pos: Vector3, tex: Texture2D) -> void:
+  if _queue_count == _QUEUE_CAPACITY:
+    _queue_head = (_queue_head + 1) % _QUEUE_CAPACITY
+    _queue_count -= 1
+  var tail := (_queue_head + _queue_count) % _QUEUE_CAPACITY
+  _queue_pos[tail] = pos
+  _queue_tex[tail] = tex
+  _queue_count += 1
 
-  var pool: Array = _baked.get(key, [])
+
+func _enqueue_from_pool(pos: Vector3, pool: Array) -> void:
   if not pool.is_empty():
-    _blit_queue.append([pos, pool[randi() % pool.size()]])
+    _enqueue_blit(pos, pool[randi() % pool.size()])
+
+
+# Every hog that died this tick, in one call; the decal is coloured by its contagion at death.
+func _on_hogs_died(_indices: PackedInt32Array, positions: PackedVector3Array, state_bits: PackedInt32Array) -> void:
+  var fire: Array = _baked.get("fire", [])
+  var poison: Array = _baked.get("poison", [])
+  var drunk: Array = _baked.get("drunk", [])
+  var plain: Array = _baked.get("default", [])
+  for k in positions.size():
+    var bits := state_bits[k]
+    var pool := plain
+    if bits & Global.HOG_STATE_ON_FIRE:
+      pool = fire
+    elif bits & Global.HOG_STATE_POISONED:
+      pool = poison
+    elif bits & Global.HOG_STATE_DRUNK:
+      pool = drunk
+    _enqueue_from_pool(positions[k], pool)
 
 
 func _on_projectile_hit_ground(pos: Vector3, _hit_type: ProjectileBase.HitType) -> void:
-  var pool: Array = _baked.get("hit", [])
-  if not pool.is_empty():
-    _blit_queue.append([pos, pool[randi() % pool.size()]])
+  _enqueue_from_pool(pos, _baked.get("hit", []))
 
 
 func draw_explosion(world_pos_3d: Vector3) -> void:
-  var pool: Array = _baked.get("explosion", [])
-  if not pool.is_empty():
-    _blit_queue.append([world_pos_3d, pool[randi() % pool.size()]])
+  _enqueue_from_pool(world_pos_3d, _baked.get("explosion", []))
 
 
 # ---------------------------------------------------------------------------

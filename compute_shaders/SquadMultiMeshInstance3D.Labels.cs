@@ -20,18 +20,11 @@ public sealed partial class SquadMultiMeshInstance3D
       var viewportRect = GetViewport().GetVisibleRect();
 
       _labelCandidates.Clear();
-      // The readback's count, not NumBodies: hogs spawned since the GPU tick it came from
-      // have no row in it yet.
-      var bodyCount = gpuFloats.Length / INSTANCE_STRIDE;
-      for (var i = 0; i < bodyCount; i++)
+      // The live hogs of this readback, listed by ReadbackPass: no corpse rows to skip.
+      foreach (var i in _liveHogs.AsSpan(0, _aliveHogCount))
       {
         var o = i * INSTANCE_STRIDE;
         var stateBits = BitConverter.SingleToUInt32Bits(gpuFloats[o + INST_STATE]);
-        if ((stateBits & STATE_DEAD) != 0)
-        {
-          continue;
-        }
-
         var worldPos = new Vector3(
           gpuFloats[o + INST_ORIGIN_X],
           gpuFloats[o + INST_ORIGIN_Y],
@@ -63,7 +56,7 @@ public sealed partial class SquadMultiMeshInstance3D
       {
         if (!_nextLabeledSet.Contains(i))
         {
-          _ = HogLabels.Call("release_label", i);
+          _ = HogLabels.Call(_releaseLabelMethod, i);
         }
       }
 
@@ -99,11 +92,11 @@ public sealed partial class SquadMultiMeshInstance3D
     if (forceAssign || (HogBehaviourState)_hogStates[index] != state)
     {
       _hogStates[index] = (byte)state;
-      _ = HogLabels.Call("assign_label", index, (int)state, worldPos);
+      _ = HogLabels.Call(_assignLabelMethod, index, (int)state, worldPos);
     }
     else
     {
-      _ = HogLabels.Call("update_label_position", index, worldPos, true);
+      _ = HogLabels.Call(_updateLabelPositionMethod, index, worldPos, true);
     }
   }
 

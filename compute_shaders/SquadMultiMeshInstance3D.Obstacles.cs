@@ -2,6 +2,7 @@ namespace ExplosionSquadGame.compute_shaders;
 
 using System;
 using System.Collections.Generic;
+using System.Runtime.InteropServices;
 using Godot;
 
 public sealed partial class SquadMultiMeshInstance3D
@@ -204,7 +205,6 @@ public sealed partial class SquadMultiMeshInstance3D
     // Grow with headroom to avoid frequent resizing
     _obstacleCapacity = Math.Max(requiredFloats, _obstacleCapacity * 2);
     _obstacleStaging = new float[_obstacleCapacity];
-    _obstacleBytes = new byte[_obstacleCapacity * sizeof(float)];
   }
 
   /// <summary>
@@ -419,8 +419,11 @@ public sealed partial class SquadMultiMeshInstance3D
       EnqueueGrowObstacles(byteCount);
     }
 
-    Buffer.BlockCopy(_obstacleStaging, 0, _obstacleBytes, 0, byteCount);
-    EnqueueGpuWrite(GpuTarget.Obstacles, 0, _obstacleBytes.AsSpan(0, byteCount));
+    EnqueueGpuWrite(
+      GpuTarget.Obstacles,
+      0,
+      MemoryMarshal.AsBytes(_obstacleStaging.AsSpan(0, _numObstacles * OBSTACLE_STRIDE))
+    );
   }
 
   private static void FindCollisionShapes(Node node, List<CollisionShape3D> results)

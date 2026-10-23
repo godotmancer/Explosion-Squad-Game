@@ -1,0 +1,13 @@
+<Project Sdk="Godot.NET.Sdk/4.8.0-dev">
+  <PropertyGroup>
+    <TargetFramework>net9.0</TargetFramework>
+    <TargetFramework Condition=" '$(GodotTargetPlatform)' == 'android' ">net9.0</TargetFramework>
+    <EnableDynamicLoading>true</EnableDynamicLoading>
+    <LangVersion>13</LangVersion>
+    <NoWarn>$(NoWarn);CA1707,CA1051,IDE0008</NoWarn>
+    <!-- The editor runs the Debug configuration, for which the Godot SDK turns JIT optimisation
+         off; the per-hog loops (compaction, trigger zones) then run ~2x slower. Optimise every
+         configuration. Breakpoints still work; stepping and inspecting locals are less reliable. -->
+    <Optimize>true</Optimize>
+  </PropertyGroup>
+</Project>

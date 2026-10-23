@@ -21,6 +21,12 @@ public sealed partial class SquadMultiMeshInstance3D
   /// Runs from _Process, once per rendered frame, so it culls against the camera the frame
   /// renders from and uploads once however many ticks the frame ran. It uploads only when there
   /// is a new readback or the view has moved.
+  ///
+  /// The MultiMesh is sized to what is drawn, not to the body capacity: MultimeshSetBuffer
+  /// takes InstanceCount rows, so every slot past the drawn ones was uploaded for nothing.
+  /// It grows to 1.25× the drawn count once that no longer fits and shrinks once it draws under
+  /// half, never below <see cref="MULTIMESH_MIN_INSTANCES"/>. A resize clears the MultiMesh;
+  /// the upload straight after refills it.
   /// </summary>
   private void DrawHogs()
   {
@@ -56,8 +62,14 @@ public sealed partial class SquadMultiMeshInstance3D
     _hogsDrawDirty = false;
 
     ReadOnlySpan<float> src = MemoryMarshal.Cast<byte, float>(_drawReadback.AsSpan());
+    // The readback's live hogs, listed by ReadbackPass alongside it: corpses are never visited.
+    ReadOnlySpan<int> live = _liveHogs.AsSpan(0, _aliveHogCount);
+    if (_transformFloats.Length < live.Length * DRAW_STRIDE)
+    {
+      _transformFloats = new float[_bodyCapacity * DRAW_STRIDE];
+    }
+
     var dst = _transformFloats.AsSpan();
-    var bodyCount = src.Length / INSTANCE_STRIDE;
 
     // How far outside a plane a hog's origin may be and still have its mesh, or a shadow worth
     // keeping, reach into the view. Negative: the planes measure distance into the view.
@@ -73,14 +85,9 @@ public sealed partial class SquadMultiMeshInstance3D
     float minX = float.MaxValue, minY = float.MaxValue, minZ = float.MaxValue;
     float maxX = float.MinValue, maxY = float.MinValue, maxZ = float.MinValue;
     var drawn = 0;
-    for (var i = 0; i < bodyCount; i++)
+    foreach (var i in live)
     {
       var o = i * INSTANCE_STRIDE;
-      if ((BitConverter.SingleToUInt32Bits(src[o + INST_STATE]) & STATE_DEAD) != 0)
-      {
-        continue;
-      }
-
       var x = src[o + INST_ORIGIN_X];
       var y = src[o + INST_ORIGIN_Y];
       var z = src[o + INST_ORIGIN_Z];
@@ -99,7 +106,7 @@ public sealed partial class SquadMultiMeshInstance3D
         continue;
       }
 
-      src.Slice(o, INSTANCE_STRIDE).CopyTo(dst.Slice(drawn * INSTANCE_STRIDE, INSTANCE_STRIDE));
+      src.Slice(o, DRAW_STRIDE).CopyTo(dst.Slice(drawn * DRAW_STRIDE, DRAW_STRIDE));
       drawn++;
       minX = Math.Min(minX, x);
       minY = Math.Min(minY, y);
@@ -109,22 +116,40 @@ public sealed partial class SquadMultiMeshInstance3D
       maxZ = Math.Max(maxZ, z);
     }
 
-    // Our own AABB, set before the buffer: with none, MultimeshSetBuffer rebuilds one by
-    // transforming the mesh bounds by every row of the buffer, the whole capacity, including
-    // the stale rows past VisibleInstanceCount. It is also the box Godot culls the MultiMesh by
-    // per light and cascade, so a tight one keeps the crowd out of shadow maps it cannot reach.
-    var r = _hogBoundingRadius;
-    var aabb =
-      drawn > 0
-        ? new Aabb(
-          new Vector3(minX - r, minY - r, minZ - r),
-          new Vector3(maxX - minX + 2 * r, maxY - minY + 2 * r, maxZ - minZ + 2 * r)
-        )
-        : new Aabb(Vector3.Zero, new Vector3(r, r, r)); // any non-empty box: nothing is drawn
+    var instances = Multimesh.InstanceCount;
+    if (drawn > instances || (drawn < instances / 2 && instances > MULTIMESH_MIN_INSTANCES))
+    {
+      // Never past the body capacity, which the old capacity-sized MultiMesh uploaded in full:
+      // a crowd entirely in view uploads no more than it used to.
+      instances = Math.Max(
+        drawn,
+        Math.Min(Math.Max(drawn + (drawn / 4), MULTIMESH_MIN_INSTANCES), _bodyCapacity)
+      );
+      if (instances * DRAW_STRIDE > _transformFloats.Length)
+      {
+        Array.Resize(ref _transformFloats, instances * DRAW_STRIDE);
+      }
+      Multimesh.InstanceCount = instances;
+    }
+
     var rid = Multimesh.GetRid();
-    RenderingServer.MultimeshSetCustomAabb(rid, aabb);
     Multimesh.VisibleInstanceCount = drawn;
-    RenderingServer.MultimeshSetBuffer(rid, _transformFloats);
+    if (drawn == 0)
+    {
+      return;
+    }
+
+    // Our own AABB, set before the buffer: with none, MultimeshSetBuffer rebuilds one by
+    // transforming the mesh bounds by every row of the buffer, including the stale rows past
+    // VisibleInstanceCount. It is also the box Godot culls the MultiMesh by per light and
+    // cascade, so a tight one keeps the crowd out of shadow maps it cannot reach.
+    var r = _hogBoundingRadius;
+    var aabb = new Aabb(
+      new Vector3(minX - r, minY - r, minZ - r),
+      new Vector3(maxX - minX + 2 * r, maxY - minY + 2 * r, maxZ - minZ + 2 * r)
+    );
+    RenderingServer.MultimeshSetCustomAabb(rid, aabb);
+    RenderingServer.MultimeshSetBuffer(rid, _transformFloats.AsSpan(0, instances * DRAW_STRIDE));
   }
 
   [MethodImpl(MethodImplOptions.AggressiveInlining)]

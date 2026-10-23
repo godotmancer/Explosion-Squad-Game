@@ -18,12 +18,26 @@ func _ready() -> void:
   initial_triggers = allowed_triggers
   material = mesh_instance_3d.get_active_material(0) as StandardMaterial3D
 
+# `count` hogs entered `_zone` this tick; `_position` is where the last of them did. One flash
+# and one announcement per call, however many there were.
 func trigger(
-  _hog_index: int,
+  count: int,
   _position: Vector3,
   _zone: CollisionShape3D,
-  _effect: int
+  _effect: int,
+  show_fx: bool = true
   ) -> void:
+  allowed_triggers -= count
+  if show_fx:
+    _play_fx(_position, _zone, _effect)
+
+  if allowed_triggers <= 0:
+    _zone.disabled = true
+    _zone.visible = false
+    if gate_mesh_3d:
+      gate_mesh_3d.visible = false
+
+func _play_fx(_position: Vector3, _zone: CollisionShape3D, _effect: int) -> void:
   material.emission_energy_multiplier = 0.0
   damage_effect = _effect == 0
   if tween:
@@ -35,7 +49,6 @@ func trigger(
   tween = create_tween()
   tween.tween_property(material, "emission_energy_multiplier", 16.0, 0.15)
   tween.tween_property(material, "emission_energy_multiplier", 0.0, 0.05)
-  allowed_triggers -= 1
   var announce := announce_scn.instantiate() as Announce3D
   if damage_effect:
     announce.text = "%d" % [initial_triggers - allowed_triggers]
@@ -50,9 +63,3 @@ func trigger(
 
   get_tree().root.add_child(announce)
   announce.global_position = _position
-
-  if allowed_triggers <= 0:
-    _zone.disabled = true
-    _zone.visible = false
-    if gate_mesh_3d:
-      gate_mesh_3d.visible = false

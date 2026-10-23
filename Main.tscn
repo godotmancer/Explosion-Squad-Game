@@ -102,8 +102,6 @@ rim = 0.28
 rim_tint = 0.71
 clearcoat = 0.54
 clearcoat_roughness = 0.04
-subsurf_scatter_enabled = true
-subsurf_scatter_strength = 0.79
 backlight_enabled = true
 backlight = Color(0.60609305, 0.6174238, 0, 1)
 
@@ -120,8 +118,6 @@ rim = 0.28
 rim_tint = 0.71
 clearcoat = 0.54
 clearcoat_roughness = 0.04
-subsurf_scatter_enabled = true
-subsurf_scatter_strength = 0.79
 backlight_enabled = true
 backlight = Color(0.60609305, 0.6174238, 0, 1)
 
@@ -185,8 +181,6 @@ rim = 0.28
 rim_tint = 0.71
 clearcoat = 0.54
 clearcoat_roughness = 0.04
-subsurf_scatter_enabled = true
-subsurf_scatter_strength = 0.79
 backlight_enabled = true
 backlight = Color(0.60609305, 0.6174238, 0, 1)
 
@@ -200,8 +194,6 @@ rim = 0.28
 rim_tint = 0.71
 clearcoat = 0.54
 clearcoat_roughness = 0.04
-subsurf_scatter_enabled = true
-subsurf_scatter_strength = 0.79
 backlight_enabled = true
 backlight = Color(0.60609305, 0.6174238, 0, 1)
 
@@ -251,7 +243,6 @@ size = Vector3(0.5, 0.5, 0.75)
 [sub_resource type="MultiMesh" id="MultiMesh_thnk1"]
 transform_format = 1
 use_colors = true
-use_custom_data = true
 mesh = SubResource("BoxMesh_5uiug")
 
 [sub_resource type="StandardMaterial3D" id="StandardMaterial3D_5hjr7"]
@@ -281,8 +272,8 @@ transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 19.071808, 15.788399, 81.1851
 light_color = Color(0.5469679, 0.546968, 0.5469679, 1)
 light_angular_distance = 0.7
 light_specular = 2.773
-directional_shadow_blend_splits = true
-directional_shadow_max_distance = 100.0
+directional_shadow_mode = 1
+directional_shadow_max_distance = 60.0
 
 [node name="RotatableCamera3D" parent="Basic3DScene" index="1" unique_id=1248314386]
 transform = Transform3D(-1, -6.497754e-08, 1.3629986e-07, 0, 0.9026732, 0.4303268, -1.509958e-07, 0.4303268, -0.9026732, -0.012458932, 26.864872, -57.833824)
@@ -341,6 +332,7 @@ transform = Transform3D(0.99995315, 0.0068490417, 0.00684888, -0.00684904, -4.37
 light_color = Color(0.09536316, 0.6968441, 0.8330994, 1)
 light_energy = 8.037
 shadow_enabled = true
+shadow_caster_mask = 4294967287
 shadow_blur = 5.301
 spot_range = 20.0
 spot_attenuation = 0.23
@@ -707,7 +699,7 @@ light_color = Color(1, 0.21176471, 1, 1)
 light_energy = 2.731
 light_size = 0.748
 shadow_enabled = true
-shadow_caster_mask = 4294967293
+shadow_caster_mask = 4294967285
 omni_range = 12.009
 omni_attenuation = -0.055
 
@@ -740,6 +732,7 @@ metadata/_custom_type_script = "uid://c8cmujrxj2dq7"
 
 [node name="SquadMultiMeshInstance3D" type="MultiMeshInstance3D" parent="." unique_id=582147531 node_paths=PackedStringArray("Camera", "TargetMarker", "ObstaclesRoot", "BombSpawner", "DrawableGround", "MouseGlobalPositionNode", "SpawnPoint", "HogLabels")]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.25, 0)
+layers = 8
 material_override = SubResource("ShaderMaterial_hhcpw")
 multimesh = SubResource("MultiMesh_thnk1")
 script = ExtResource("20_jt61w")

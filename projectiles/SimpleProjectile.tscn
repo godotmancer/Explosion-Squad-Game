@@ -16,4 +16,5 @@ rings = 8
 script = ExtResource("1_pj5cm")
 
 [node name="MeshInstance3D" type="MeshInstance3D" parent="." unique_id=244362647]
+cast_shadow = 0
 mesh = SubResource("SphereMesh_nulnj")

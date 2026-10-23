@@ -218,7 +218,7 @@ Explosion-Squad-Game/
 │   ├── SquadMultiMeshInstance3D.GpuQueue.cs # Deferred GPU command queue (single drain point)
 │   ├── SquadMultiMeshInstance3D.Obstacles.cs# Obstacle cache, OBB/circle emit, trimesh footprints
 │   ├── SquadMultiMeshInstance3D.Projectiles.cs # Slot pool, SpawnProjectile, UploadPending
-│   ├── SquadMultiMeshInstance3D.Bombs.cs    # Bomb buffer, Detonate, death FX pool, OnHogDied
+│   ├── SquadMultiMeshInstance3D.Bombs.cs    # Bomb buffer, Detonate, death FX pool, HogsDied
 │   ├── SquadMultiMeshInstance3D.TriggerZones.cs # Zone detection, deferred spawns
 │   ├── SquadMultiMeshInstance3D.Labels.cs   # Distance-sorted label assignment
 │   ├── spatial_hash_build.glsl                # Wrap-around grid + airborne list
@@ -341,8 +341,7 @@ The whole point of this project is that it stays fast. What makes that work:
 - **Deferred GPU command queue.** Every buffer mutation is recorded and applied from one drain
   point right before the dispatch. Buffer growth copies GPU→GPU with `BufferCopy` instead of
   reading back and merging on the CPU.
-- **1.25× capacity growth and live-prefix readback.** Only the live hogs are read back, not the
-  whole allocated capacity.
+- **Live-prefix readback.** Only the live hogs are read back, not the whole allocated capacity.
 - **Obstacle broad-phase.** A conservative centre-distance reject in both obstacle loops.
 - **Label3D pooling** and **pre-baked ground textures**, so neither allocates per frame.
 - **Forward+ renderer**, chosen for the GPU-heavy workload.

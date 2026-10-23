@@ -32,6 +32,9 @@ public sealed partial class SquadMultiMeshInstance3D : MultiMeshInstance3D
   /// <summary>Live hogs in the latest readback, whether drawn or culled.</summary>
   public int AliveHogCount => _aliveHogCount;
 
+  /// <summary>Hogs that have died this session.</summary>
+  public int DeadHogCount => _deadHogCount;
+
   [Export]
   public int NumBodies { get; set; } = 5000;
 
@@ -170,7 +173,7 @@ public sealed partial class SquadMultiMeshInstance3D : MultiMeshInstance3D
     public float Value;
   }
 
-  // One zone's footprint for one ProcessTriggerZones pass, resolved once per pass rather than
+  // One zone's footprint for one trigger-zone pass, resolved once per pass rather than
   // once per hog. The Min/Max box is a cheap reject tested before the exact shape.
   private struct TriggerBounds
   {
@@ -189,7 +192,31 @@ public sealed partial class SquadMultiMeshInstance3D : MultiMeshInstance3D
   public delegate void HogStateChangedEventHandler(int index, int newState, Vector3 worldPos);
 
   private readonly List<BombState> _activeBombs = [];
-  private readonly HashSet<int> _deadHogs = [];
+  // Per body, set once its death has been handled. Indices are never recycled, so a HashSet
+  // here was probed for every corpse on every tick. Sized to _bodyCapacity, grown in SpawnHogs.
+  private bool[] _deadHogs;
+  private int _deadHogCount;
+
+  // The live hogs of the latest readback, as rows into it: the first _aliveHogCount entries.
+  // Built by the readback pass, so DrawHogs and the label scan skip corpses without reading
+  // their rows. Sized to _bodyCapacity, grown in SpawnHogs.
+  private int[] _liveHogs;
+
+  // This tick's deaths, emitted together as HogsDied after the readback pass. Cleared, never
+  // reallocated.
+  private readonly List<int> _diedIndices = [];
+  private readonly List<Vector3> _diedPositions = [];
+  private readonly List<int> _diedStateBits = [];
+
+  // GDScript method and input action names, converted to StringName once. Passing a string
+  // literal builds a new StringName on every call, and these run per death, per label or per
+  // frame.
+  private static readonly StringName _releaseLabelMethod = "release_label";
+  private static readonly StringName _assignLabelMethod = "assign_label";
+  private static readonly StringName _updateLabelPositionMethod = "update_label_position";
+  private static readonly StringName _playFxMethod = "play_fx";
+  private static readonly StringName _drawExplosionMethod = "draw_explosion";
+  private static readonly StringName _spawnHogsAction = "spawn_hogs";
   private readonly Queue<Vector3> _deathFxQueue = new();
   private readonly Queue<Node3D> _deathFxPool = new();
   private int _deathFxTotalCreated;
@@ -249,6 +276,15 @@ public sealed partial class SquadMultiMeshInstance3D : MultiMeshInstance3D
   public const uint HASH_ENTRIES_BUFFER_SIZE =
     ((HASH_TABLE_SIZE * HASH_MAX_PER_CELL) + HASH_AIR_MAX) * sizeof(uint);
 
+  // One fear word per grid bucket (hash_fear in spatial_hash_build.glsl), zeroed every tick
+  // before the build.
+  public const uint HASH_FEAR_BUFFER_SIZE = HASH_TABLE_SIZE * sizeof(uint);
+
+  // Bytes per body of the neighbour snapshot the hash build writes for physics_compute's
+  // neighbour scan. ⚠ Must match struct Neighbour in spatial_hash_build.glsl and
+  // physics_compute.glsl (position, velocity, radius, last_hit_time, bomb origin, drunk expiry).
+  public const int NEIGHBOUR_STRIDE = 32;
+
   // Each bucket word is (frame stamp << 16) | entry count, and a word carrying any stamp but
   // this frame's reads as empty — that is what lets the build skip a clear pass. The stamp is
   // the physics frame index masked to 16 bits; see where it advances in _PhysicsProcess.
@@ -272,15 +308,19 @@ public sealed partial class SquadMultiMeshInstance3D : MultiMeshInstance3D
   private Rid _hashUniformSet;
   private Rid _hashCountsBuffer; // HASH_COUNTS_BUFFER_SIZE bytes
   private Rid _hashEntriesBuffer; // HASH_ENTRIES_BUFFER_SIZE bytes
+  private Rid _hashFearBuffer; // HASH_FEAR_BUFFER_SIZE bytes
+  private Rid _neighbourBuffer; // _bodyCapacity × NEIGHBOUR_STRIDE bytes, grown with the bodies
   private byte[] _hashPushBytes;
 
-  // Push constant layout for spatial_hash_build.glsl (4 × float/uint = 16 bytes)
+  // Push constant layout for spatial_hash_build.glsl (6 × float/uint = 24 bytes)
   private const int HASH_PUSH_FRAME_STAMP = 0; // uint  frame_stamp (see HASH_STAMP_MASK)
   private const int HASH_PUSH_NUM_BODIES = 1; // int   num_bodies
   private const int HASH_PUSH_Y_OFFSET = 2; // float y_offset
+  private const int HASH_PUSH_TIME = 3; // float time
+  private const int HASH_PUSH_BOMB_FEAR_DURATION = 4; // float bomb_fear_duration
 
-  // slot 3 is padding
-  private const int HASH_BUILD_PUSH_SIZE = 4 * sizeof(float);
+  // slot 5 is padding
+  private const int HASH_BUILD_PUSH_SIZE = 6 * sizeof(float);
 
   private uint _hashFrameStamp; // physics frame index & HASH_STAMP_MASK
   private int _projReadbackCounter; // throttle: only read projectile buffer every N frames
@@ -295,15 +335,24 @@ public sealed partial class SquadMultiMeshInstance3D : MultiMeshInstance3D
   private float[] _projLifetimes; // remaining lifetime per slot (C# countdown)
   private Action<Vector3>[] _projHitCallbacks; // optional per-slot collision callback
   private bool[] _projPendingUpload; // true while slot data hasn't been uploaded to GPU yet
-  private readonly Queue<int> _projFreeSlots = new();
+  // Free slots, handed out lowest first. A LIFO keeps the live slots packed at the bottom, so
+  // the dispatch and the flag readback stop at _projHighWater instead of covering all 1024.
+  private readonly Stack<int> _projFreeSlots = new();
+  private int _projHighWater; // every slot at or above it is free
   private readonly Queue<int> _pendingProjSpawns = new(); // queued slot indices awaiting upload
   private float[] _projAllStagingFloats; // [MAX_PROJECTILES * PROJ_STRIDE] — written in SpawnProjectile, read in UploadPendingProjectiles
-  private byte[] _projSlotUploadBytes; // [PROJ_STRIDE * sizeof(float)] — reused per-slot upload, never reallocated
   private static readonly byte[] _zeroFlagBytes = new byte[sizeof(float)]; // cleared alive flag, written to GPU on slot reclaim
   private byte[] _projPushBytes;
   private const float PROJ_LIFETIME_GRACE = 0.1f; // extra seconds before reclaiming a slot
 
+  // The MultiMesh upload: the drawn hogs' rows, packed, DRAW_STRIDE floats each. Grown by
+  // DrawHogs to hold every body, never shrunk; only its first InstanceCount rows are uploaded.
   private float[] _transformFloats;
+
+  // The smallest the MultiMesh is sized to. DrawHogs grows it to 1.25× what it draws once that
+  // no longer fits, and shrinks it once it draws under half.
+  private const int MULTIMESH_MIN_INSTANCES = 1024;
+
   private float _time;
   private Vector2 _targetPos = Vector2.Zero;
   private bool _moveMarkerWithMouse;
@@ -359,6 +408,11 @@ public sealed partial class SquadMultiMeshInstance3D : MultiMeshInstance3D
   }
 
   public const int INSTANCE_STRIDE = 20; // 12 transform + 4 color + 4 custom
+
+  // Floats per MultiMesh row as uploaded: the first 16 of an instance row (transform + color).
+  // The hog shader reads only COLOR, so the MultiMesh is set up without custom data and the
+  // custom row (health, state) stays in the readback for the CPU.
+  public const int DRAW_STRIDE = 16;
 
   // Bitwise state flags — must match STATE_* constants in physics_compute.glsl
   public const uint STATE_IDLE = 1u;
@@ -560,7 +614,12 @@ public sealed partial class SquadMultiMeshInstance3D : MultiMeshInstance3D
   // Per-pass zone footprints, indexed like the zone list.
   private readonly TriggerBounds[] _triggerBounds = new TriggerBounds[MAX_TRIGGER_ZONES];
 
-  // Trigger-zone damage summed per hog over one ProcessTriggerZones pass, then written once
+  // Enters per zone this pass, and where the last of them happened: ZoneTriggered is emitted
+  // once per zone from these after the pass. Indexed like the zone list.
+  private readonly int[] _zoneTriggerCounts = new int[MAX_TRIGGER_ZONES];
+  private readonly Vector3[] _zoneTriggerPositions = new Vector3[MAX_TRIGGER_ZONES];
+
+  // Trigger-zone damage summed per hog over one trigger-zone pass, then written once
   // per hog by FlushZoneDamage. damage_accum is a plain GPU word that a CPU write replaces,
   // so writing each zone's damage straight away kept only the last of two zones a hog
   // entered in the same frame. Cleared, never reallocated, so steady state is zero-alloc.
@@ -582,7 +641,7 @@ public sealed partial class SquadMultiMeshInstance3D : MultiMeshInstance3D
   private byte[] _drawReadback;
   private int _aliveHogCount; // live hogs in _drawReadback
 
-  // Something new to draw: a readback, a MultiMesh resize, ShowHogs turned back on. Otherwise
+  // Something new to draw: a readback, ShowHogs turned back on. Otherwise
   // DrawHogs uploads again only when the camera or the squad node has moved since the last draw.
   private bool _hogsDrawDirty;
   private Transform3D _drawnView;
@@ -615,46 +674,45 @@ public sealed partial class SquadMultiMeshInstance3D : MultiMeshInstance3D
 
   private byte[] _physicsPushBytes;
   private float[] _bombStaging; // MAX_BOMBS * BOMB_STRIDE, reused every frame
-  private byte[] _bombBytes; // byte view of bomb staging, reused every frame
   private float[] _obstacleStaging; // pre-allocated with capacity, grown if needed
-  private byte[] _obstacleBytes; // byte view of obstacle staging, grown with it
   private int _obstacleCapacity; // current capacity in floats
 
   // Must match local_size_x in both compute shaders
   private const int GPU_THREAD_GROUP_SIZE = 64;
 
-  // Body-buffer capacity growth. Deliberately tighter than the usual doubling because the
-  // MultiMesh upload is sized by CAPACITY, not by live hog count: Multimesh.InstanceCount
-  // tracks capacity (tying it to NumBodies instead would reallocate on every spawn), and
-  // MultimeshSetBuffer must be handed InstanceCount * INSTANCE_STRIDE floats. So every unused
-  // slot costs upload bandwidth every frame for the rest of the session. Doubling left up to
-  // 50% of the buffer as dead weight — measured 40000 capacity carrying ~20000 live hogs,
-  // i.e. 3.2 MB uploaded per frame to draw 1.6 MB of hogs. Growth events cost a few ms each
-  // and are one-off, so trading more of them for a permanently tighter buffer is the right
-  // way round. The absolute floor stops small capacities from growing by a rounding error.
-  private const float BODY_CAPACITY_GROWTH = 1.25f;
+  // Body-buffer capacity growth. The MultiMesh is sized by what DrawHogs draws and the
+  // readback by NumBodies, so unused capacity costs only VRAM, never per-frame bandwidth.
+  // Doubling keeps growth events — a GPU copy of every body and three uniform-set rebuilds —
+  // rare while trigger zones keep adding hogs. The floor stops small capacities from growing by
+  // a rounding error.
+  private const float BODY_CAPACITY_GROWTH = 2f;
   private const int BODY_CAPACITY_MIN_STEP = 256;
 
-  [Signal]
-  public delegate void HogDiedEventHandler(int index, Vector3 position, uint stateBits);
-
   /// <summary>
-  /// Emitted each time a hog's enter event fires for a trigger zone.
-  /// <list type="bullet">
-  ///   <item><paramref name="hogIndex"/> — body slot index of the hog</item>
-  ///   <item><paramref name="position"/> — world position of the hog at the moment of entry</item>
-  ///   <item><paramref name="zone"/> — the CollisionShape3D node that carries the trigger metadata</item>
-  ///   <item><paramref name="effect"/> — <see cref="TriggerEffect"/> cast to int (0=Damage, 1=Multiply, 2=Add)</item>
-  /// </list>
-  /// Not emitted for Multiply/Add when the hog is permanently immune (<c>_triggeredPairs</c>).
-  /// Connect with <c>CONNECT_DEFERRED</c> if you need to run heavy visual work at idle time.
+  /// Emitted once per tick with every hog that died in it, in three parallel arrays: body
+  /// index, world position, and its <c>STATE_*</c> bits at death (for the decal colour).
+  /// One signal per tick rather than per hog, so a bomb killing thousands costs one call.
   /// </summary>
   [Signal]
-  public delegate void HogZoneTriggeredEventHandler(
-    int hogIndex,
-    Vector3 position,
+  public delegate void HogsDiedEventHandler(int[] indices, Vector3[] positions, int[] stateBits);
+
+  /// <summary>
+  /// Emitted once per tick for each trigger zone hogs entered in it.
+  /// <list type="bullet">
+  ///   <item><paramref name="zone"/> — the CollisionShape3D node that carries the trigger metadata</item>
+  ///   <item><paramref name="effect"/> — <see cref="TriggerEffect"/> cast to int (0=Damage, 1=Multiply, 2=Add)</item>
+  ///   <item><paramref name="count"/> — how many hogs triggered it this tick</item>
+  ///   <item><paramref name="position"/> — world position of the last of them</item>
+  /// </list>
+  /// Clones swallowed by their Multiply/Add skip mark (<c>_triggeredPairs</c>) are not counted.
+  /// Emitted whether or not <see cref="ShowHogs"/>: handlers keep gameplay state.
+  /// </summary>
+  [Signal]
+  public delegate void ZoneTriggeredEventHandler(
     CollisionShape3D zone,
-    int effect
+    int effect,
+    int count,
+    Vector3 position
   );
 
   public override void _Ready()
@@ -726,7 +784,7 @@ public sealed partial class SquadMultiMeshInstance3D : MultiMeshInstance3D
 
   public override void _Process(double delta)
   {
-    if (Input.IsActionPressed("spawn_hogs"))
+    if (Input.IsActionPressed(_spawnHogsAction))
     {
       var spawnTarget = MouseGlobalPositionNode.GlobalPosition;
       var forceDir = spawnTarget.DirectionTo(TargetMarker.GlobalPosition).Normalized();
@@ -809,7 +867,10 @@ public sealed partial class SquadMultiMeshInstance3D : MultiMeshInstance3D
     // for storage-buffer writes), physics silently treats those stale buckets as
     // empty rather than reading garbage body indices.
     // -------------------------------------------------------------------------
-    WriteHashBuildPush(NumBodies, YOffset);
+    WriteHashBuildPush(NumBodies, YOffset, _time, BombFearDuration);
+    // The build ranks frightened hogs into each bucket's fear word with atomicMax, so the words
+    // start every tick at zero (no frightened hog). 128 KB.
+    EnqueueGpuClear(GpuTarget.HashFear, 0, HASH_FEAR_BUFFER_SIZE);
     WriteProjectilePush(fdelta, _time);
 
     // Apply every queued buffer mutation. This is the ONE place GPU buffers are written,
@@ -830,12 +891,17 @@ public sealed partial class SquadMultiMeshInstance3D : MultiMeshInstance3D
     _rd.ComputeListAddBarrier(cl); // hash writes → projectile + physics reads
 
     // --- Projectile (runs before physics so effects are visible to physics this frame) ---
-    var projGroups = (uint)Mathf.CeilToInt((float)MAX_PROJECTILES / GPU_THREAD_GROUP_SIZE);
-    _rd.ComputeListBindComputePipeline(cl, _projPipeline);
-    _rd.ComputeListBindUniformSet(cl, _projUniformSet, 0);
-    _rd.ComputeListSetPushConstant(cl, _projPushBytes, PROJ_PUSH_SIZE);
-    _rd.ComputeListDispatch(cl, projGroups, 1, 1);
-    _rd.ComputeListAddBarrier(cl); // projectile atomics → physics reads
+    // Only the slots that can be live, and nothing at all when none is: every slot at or above
+    // the high-water mark is dead on the GPU, and a dead slot does nothing but return.
+    if (_projHighWater > 0)
+    {
+      var projGroups = (uint)Mathf.CeilToInt((float)_projHighWater / GPU_THREAD_GROUP_SIZE);
+      _rd.ComputeListBindComputePipeline(cl, _projPipeline);
+      _rd.ComputeListBindUniformSet(cl, _projUniformSet, 0);
+      _rd.ComputeListSetPushConstant(cl, _projPushBytes, PROJ_PUSH_SIZE);
+      _rd.ComputeListDispatch(cl, projGroups, 1, 1);
+      _rd.ComputeListAddBarrier(cl); // projectile atomics → physics reads
+    }
 
     // --- Physics ---
     _rd.ComputeListBindComputePipeline(cl, _physicsPipeline);
@@ -897,6 +963,15 @@ public sealed partial class SquadMultiMeshInstance3D : MultiMeshInstance3D
     var outputBytes = _rd.BufferGetData(_transformBuffer, 0, readbackBytes);
     ReadOnlySpan<float> gpuFloats = MemoryMarshal.Cast<byte, float>(outputBytes.AsSpan());
 
+    if (_deathFxQueue.Count > 0)
+    {
+      DrainDeathFxQueue();
+    }
+
+    ReadbackPass(gpuFloats);
+    _drawReadback = outputBytes;
+    _hogsDrawDirty = true;
+
     if (_showStateLabels)
     {
       _timeSinceLastLabelUpdate += delta;
@@ -907,38 +982,54 @@ public sealed partial class SquadMultiMeshInstance3D : MultiMeshInstance3D
       }
       UpdateLabels(gpuFloats, forceRecalculate);
     }
+  }
 
-    if (_deathFxQueue.Count > 0)
-    {
-      DrainDeathFxQueue();
-    }
-
-    // STATE_DEAD is the authoritative source for death. This runs every tick, whether or not
-    // hogs are drawn, so OnHogDied always fires; drawing is DrawHogs' job, once per frame.
+  /// <summary>
+  /// The one walk over the readback each tick. STATE_DEAD is the authoritative source for
+  /// death: a hog newly dead goes to <see cref="OnHogDied"/>; a live one goes on
+  /// <see cref="_liveHogs"/> (for DrawHogs and the labels) and is tested against the trigger
+  /// zones. It runs whether or not hogs are drawn. GDScript hears of deaths and zone enters
+  /// only after the walk — one HogsDied a tick, one ZoneTriggered per zone entered — so no
+  /// script runs mid-pass.
+  /// </summary>
+  private void ReadbackPass(ReadOnlySpan<float> gpuFloats)
+  {
+    // The readback's count, not NumBodies: hogs spawned since its tick have no row in it.
+    var bodyCount = gpuFloats.Length / INSTANCE_STRIDE;
+    var activeZones = BeginTriggerZonePass();
+    var zoneMasks = _zoneMasks.AsSpan(0, bodyCount);
+    var dead = _deadHogs.AsSpan(0, bodyCount);
+    var live = _liveHogs.AsSpan(0, bodyCount);
     var aliveCount = 0;
-    for (var i = 0; i < _gpuTickBodies; i++)
+    for (var i = 0; i < bodyCount; i++)
     {
-      var src = i * INSTANCE_STRIDE;
-      var stateBits = BitConverter.SingleToUInt32Bits(gpuFloats[src + INST_STATE]);
-      if ((stateBits & STATE_DEAD) == 0)
+      var row = gpuFloats.Slice(i * INSTANCE_STRIDE, INSTANCE_STRIDE);
+      var stateBits = BitConverter.SingleToUInt32Bits(row[INST_STATE]);
+      if ((stateBits & STATE_DEAD) != 0)
       {
-        aliveCount++;
+        if (!dead[i])
+        {
+          dead[i] = true;
+          OnHogDied(i, row[INST_ORIGIN_X], row[INST_ORIGIN_Z], stateBits);
+        }
+        continue;
       }
-      else if (_deadHogs.Add(i))
+
+      live[aliveCount++] = i;
+      if (activeZones != 0)
       {
-        OnHogDied(i, gpuFloats[src + INST_ORIGIN_X], gpuFloats[src + INST_ORIGIN_Z], stateBits);
-        _ = HogLabels?.Call("release_label", i);
+        TestTriggerZones(
+          i,
+          new Vector2(row[INST_ORIGIN_X], row[INST_ORIGIN_Z]),
+          activeZones,
+          ref zoneMasks[i]
+        );
       }
     }
 
     _aliveHogCount = aliveCount;
-    _drawReadback = outputBytes;
-    _hogsDrawDirty = true;
-
-    if (_triggerZones is { Count: > 0 })
-    {
-      ProcessTriggerZones(gpuFloats);
-    }
+    EmitHogsDied();
+    EndTriggerZonePass();
   }
 
   private void UpdateTargetFromMouse()
@@ -955,31 +1046,12 @@ public sealed partial class SquadMultiMeshInstance3D : MultiMeshInstance3D
 
   public void SpawnHogs(int count, Vector3 position, Vector3 initialVelocity = default)
   {
-    var newCount = NumBodies + count;
-    var newSquadsData = new GpuBody[count];
-
-    var heightVal = initialVelocity.Y > 0.1f ? Math.Max(position.Y, YOffset + 0.02f) : position.Y;
-
-    for (var i = 0; i < count; i++)
+    if (count <= 0)
     {
-      newSquadsData[i] = new GpuBody
-      {
-        Position = new Vector2(position.X, position.Z),
-        Velocity = new Vector2(initialVelocity.X, initialVelocity.Z),
-        Height = heightVal,
-        VerticalVelocity = initialVelocity.Y,
-        Radius = BodyRadius,
-        Mass = _rndGen.RandfRange(0.5f, 1.1f),
-        FacingAngle = 0.0f,
-        Health = HogHealth,
-        LastHitTime = 0.0f,
-        BombOriginX = 0.0f,
-        BombOriginY = 0.0f,
-        DamagedTime = 0.0f,
-      };
+      return;
     }
 
-    var newBytes = MemoryMarshal.Cast<GpuBody, byte>(newSquadsData.AsSpan());
+    var newCount = NumBodies + count;
     var writeOffset = (uint)(NumBodies * BODY_STRIDE * sizeof(float));
 
     // Capacity growth is queued ahead of the body write so the write resolves to the grown
@@ -998,9 +1070,35 @@ public sealed partial class SquadMultiMeshInstance3D : MultiMeshInstance3D
       _bodyCapacity = newCapacity;
       Array.Resize(ref _hogStates, newCapacity);
       Array.Resize(ref _zoneMasks, newCapacity);
+      Array.Resize(ref _deadHogs, newCapacity);
+      Array.Resize(ref _liveHogs, newCapacity);
     }
 
-    EnqueueGpuWrite(GpuTarget.Physics, writeOffset, newBytes);
+    // Written straight into the queued payload: no staging array per call. Reserved after any
+    // growth, so the write resolves to the grown buffer.
+    var heightVal = initialVelocity.Y > 0.1f ? Math.Max(position.Y, YOffset + 0.02f) : position.Y;
+    var bodies = MemoryMarshal.Cast<byte, GpuBody>(
+      ReserveGpuWrite(GpuTarget.Physics, writeOffset, count * BODY_STRIDE * sizeof(float))
+    );
+    for (var i = 0; i < count; i++)
+    {
+      bodies[i] = new GpuBody
+      {
+        Position = new Vector2(position.X, position.Z),
+        Velocity = new Vector2(initialVelocity.X, initialVelocity.Z),
+        Height = heightVal,
+        VerticalVelocity = initialVelocity.Y,
+        Radius = BodyRadius,
+        Mass = _rndGen.RandfRange(0.5f, 1.1f),
+        FacingAngle = 0.0f,
+        Health = HogHealth,
+        LastHitTime = 0.0f,
+        BombOriginX = 0.0f,
+        BombOriginY = 0.0f,
+        DamagedTime = 0.0f,
+      };
+    }
+
     NumBodies = newCount;
   }
 }

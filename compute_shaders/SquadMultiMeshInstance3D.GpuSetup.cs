@@ -8,7 +8,12 @@ public sealed partial class SquadMultiMeshInstance3D
 {
   private void SetupMultiMesh()
   {
-    Multimesh.InstanceCount = NumBodies;
+    // DrawHogs uploads DRAW_STRIDE floats a hog: transform and colour, no custom data. The
+    // format can only change while the MultiMesh is empty, and it stays empty here: DrawHogs
+    // sizes it to the hogs it draws.
+    Multimesh.InstanceCount = 0;
+    Multimesh.UseColors = true;
+    Multimesh.UseCustomData = false;
 
     // The footprint physics keeps out of walls: the drawn mesh's XZ bounds. Falls back to a
     // BodyRadius square when there is no mesh to measure.
@@ -38,12 +43,10 @@ public sealed partial class SquadMultiMeshInstance3D
     // --- Pre-allocate staging buffers (reused every frame, zero GC pressure) ---
     _physicsPushBytes = new byte[PHYSICS_PUSH_SIZE];
     _bombStaging = new float[MAX_BOMBS * BOMB_STRIDE];
-    _bombBytes = new byte[MAX_BOMBS * BOMB_STRIDE * sizeof(float)];
 
     // Initial obstacle capacity — grown if needed, never shrunk
     _obstacleCapacity = 64 * OBSTACLE_STRIDE; // room for 64 obstacles
     _obstacleStaging = new float[_obstacleCapacity];
-    _obstacleBytes = new byte[_obstacleCapacity * sizeof(float)];
 
     // --- Physics shader ---
     var physicsFile = GD.Load<RDShaderFile>("res://compute_shaders/physics_compute.glsl");
@@ -56,6 +59,8 @@ public sealed partial class SquadMultiMeshInstance3D
 
     _hogStates = new byte[_bodyCapacity];
     _zoneMasks = new ulong[_bodyCapacity];
+    _deadHogs = new bool[_bodyCapacity];
+    _liveHogs = new int[_bodyCapacity];
 
     for (var i = 0; i < NumBodies; i++)
     {
@@ -89,19 +94,12 @@ public sealed partial class SquadMultiMeshInstance3D
 
     // --- Obstacle buffer — created at full staging capacity so runtime growth is rare ---
     ExtractObstacles(0f); // first frame: no velocity data yet
-    if (_numObstacles > 0)
-    {
-      Buffer.BlockCopy(
-        _obstacleStaging,
-        0,
-        _obstacleBytes,
-        0,
-        _numObstacles * OBSTACLE_STRIDE * sizeof(float)
-      );
-    }
-
-    _obstacleBufferSize = (uint)_obstacleBytes.Length;
-    _obstacleBuffer = _rd.StorageBufferCreate(_obstacleBufferSize, _obstacleBytes);
+    _obstacleBufferSize = (uint)(_obstacleCapacity * sizeof(float));
+    _obstacleBuffer = _rd.StorageBufferCreate(
+      _obstacleBufferSize,
+      (ReadOnlySpan<byte>)MemoryMarshal.AsBytes(_obstacleStaging.AsSpan()),
+      0 // no usage flags (the span overload has no defaults)
+    );
 
     // --- Bomb buffer (pre-allocated to MAX_BOMBS) ---
     _bombBufferSize = MAX_BOMBS * BOMB_STRIDE * sizeof(float);
@@ -119,6 +117,10 @@ public sealed partial class SquadMultiMeshInstance3D
     // entries: HASH_MAX_PER_CELL body indices per grid bucket, then HASH_AIR_MAX for the
     // airborne bucket
     _hashEntriesBuffer = _rd.StorageBufferCreate(HASH_ENTRIES_BUFFER_SIZE);
+    // fear words: one per grid bucket, zeroed before every build (see _PhysicsProcess)
+    _hashFearBuffer = _rd.StorageBufferCreate(HASH_FEAR_BUFFER_SIZE);
+    // neighbour snapshots: one per body, written by the build for physics to read
+    _neighbourBuffer = _rd.StorageBufferCreate((uint)(_bodyCapacity * NEIGHBOUR_STRIDE));
 
     // --- Spatial hash build shader ---
     var hashFile = GD.Load<RDShaderFile>("res://compute_shaders/spatial_hash_build.glsl");
@@ -130,13 +132,12 @@ public sealed partial class SquadMultiMeshInstance3D
 
     // --- MultiMesh instance buffer — written by physics_compute's tail, so it must exist
     // before the physics uniform set is built (it is binding 5). ---
-    _transformFloats = new float[NumBodies * INSTANCE_STRIDE];
-    var transformSize = (uint)(_transformFloats.Length * sizeof(float));
-    _transformBuffer = _rd.StorageBufferCreate(transformSize);
+    _transformFloats = new float[NumBodies * DRAW_STRIDE];
+    _transformBuffer = _rd.StorageBufferCreate((uint)(NumBodies * INSTANCE_STRIDE * sizeof(float)));
 
     _physicsPipeline = _rd.ComputePipelineCreate(_physicsShader);
     VerifyPipeline(_physicsPipeline, "physics_compute.glsl");
-    RebuildPhysicsUniformSet(); // bindings 0-5: bodies, obstacles, bombs, hash counts, hash entries, instances
+    RebuildPhysicsUniformSet(); // bindings 0-7: bodies, obstacles, bombs, hash counts, hash entries, instances, neighbour snapshots, fear words
 
     // --- Projectile shader + buffer ---
     var projFile = GD.Load<RDShaderFile>("res://compute_shaders/projectile_compute.glsl");
@@ -152,10 +153,11 @@ public sealed partial class SquadMultiMeshInstance3D
     _projHitCallbacks = new Action<Vector3>[MAX_PROJECTILES];
     _projPendingUpload = new bool[MAX_PROJECTILES];
     _projAllStagingFloats = new float[MAX_PROJECTILES * PROJ_STRIDE];
-    _projSlotUploadBytes = new byte[PROJ_STRIDE * sizeof(float)];
-    for (var i = 0; i < MAX_PROJECTILES; i++)
+    // Pushed highest first, so slots are handed out from 0 up and the live ones stay packed at
+    // the bottom: the dispatch and the readback cover only [0, _projHighWater).
+    for (var i = MAX_PROJECTILES - 1; i >= 0; i--)
     {
-      _projFreeSlots.Enqueue(i);
+      _projFreeSlots.Push(i);
     }
 
     RebuildProjectileUniformSet();
@@ -251,6 +253,8 @@ public sealed partial class SquadMultiMeshInstance3D
         _transformBuffer,
         _hashCountsBuffer,
         _hashEntriesBuffer,
+        _hashFearBuffer,
+        _neighbourBuffer,
         _projBuffer,
         _physicsShader,
         _hashShader,
@@ -310,7 +314,7 @@ public sealed partial class SquadMultiMeshInstance3D
     floats[PHYS_PUSH_FOOTPRINT_MAX_Z] = _hogFootprintMax.Y;
   }
 
-  private void WriteHashBuildPush(int numBodies, float yOffset)
+  private void WriteHashBuildPush(int numBodies, float yOffset, float time, float bombFearDuration)
   {
     var floats = MemoryMarshal.Cast<byte, float>(_hashPushBytes.AsSpan());
     var uints = MemoryMarshal.Cast<byte, uint>(_hashPushBytes.AsSpan());
@@ -318,7 +322,9 @@ public sealed partial class SquadMultiMeshInstance3D
     uints[HASH_PUSH_FRAME_STAMP] = _hashFrameStamp;
     ints[HASH_PUSH_NUM_BODIES] = numBodies;
     floats[HASH_PUSH_Y_OFFSET] = yOffset;
-    floats[3] = 0f; // pad
+    floats[HASH_PUSH_TIME] = time;
+    floats[HASH_PUSH_BOMB_FEAR_DURATION] = bombFearDuration;
+    floats[5] = 0f; // pad
   }
 
   private void RebuildPhysicsUniformSet()
@@ -350,7 +356,12 @@ public sealed partial class SquadMultiMeshInstance3D
     // be a separate transform_compute dispatch.
     var tu = new RDUniform { UniformType = RenderingDevice.UniformType.StorageBuffer, Binding = 5 };
     tu.AddId(_transformBuffer);
-    _physicsUniformSet = _rd.UniformSetCreate([pu, ou, bu, hcu, heu, tu], _physicsShader, 0);
+    // Bindings 6-7: the neighbour snapshots and fear words spatial_hash_build writes this tick.
+    var nu = new RDUniform { UniformType = RenderingDevice.UniformType.StorageBuffer, Binding = 6 };
+    nu.AddId(_neighbourBuffer);
+    var fu = new RDUniform { UniformType = RenderingDevice.UniformType.StorageBuffer, Binding = 7 };
+    fu.AddId(_hashFearBuffer);
+    _physicsUniformSet = _rd.UniformSetCreate([pu, ou, bu, hcu, heu, tu, nu, fu], _physicsShader, 0);
   }
 
   private void RebuildHashUniformSet()
@@ -367,7 +378,12 @@ public sealed partial class SquadMultiMeshInstance3D
     cu.AddId(_hashCountsBuffer);
     var eu = new RDUniform { UniformType = RenderingDevice.UniformType.StorageBuffer, Binding = 2 };
     eu.AddId(_hashEntriesBuffer);
-    _hashUniformSet = _rd.UniformSetCreate([bu, cu, eu], _hashShader, 0);
+    // Neighbour snapshots at binding 3 — also recreated when the bodies grow.
+    var nu = new RDUniform { UniformType = RenderingDevice.UniformType.StorageBuffer, Binding = 3 };
+    nu.AddId(_neighbourBuffer);
+    var fu = new RDUniform { UniformType = RenderingDevice.UniformType.StorageBuffer, Binding = 4 };
+    fu.AddId(_hashFearBuffer);
+    _hashUniformSet = _rd.UniformSetCreate([bu, cu, eu, nu, fu], _hashShader, 0);
   }
 
   private void RebuildProjectileUniformSet()
